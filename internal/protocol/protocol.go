@@ -22,6 +22,7 @@ type RunSpec struct {
 	Executor       string `json:"executor"`
 	Model          string `json:"model,omitempty"`
 	Repository     string `json:"repository"`
+	RepositorySlug string `json:"repository_slug,omitempty"`
 	RenderedPrompt string `json:"rendered_prompt"`
 	TimeoutMillis  int64  `json:"timeout_millis"`
 	LeaseToken     string `json:"lease_token"`

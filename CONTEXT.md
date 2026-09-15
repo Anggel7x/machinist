@@ -21,7 +21,8 @@ about whether the work was any good or whether it reached the default branch.
 _Avoid_: Status
 
 **Outcome**:
-What the *work* did — whether the change reached the repository. A job whose run
+What the *work* did — whether the change reached the repository: landed,
+unlanded, blocked, failing, waiting, draft, abandoned, or none. A job whose run
 succeeded and whose pull request sits unmerged has a good state and no outcome.
 _Avoid_: Result, status
 

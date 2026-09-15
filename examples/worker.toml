@@ -2,6 +2,12 @@
 # name is optional and defaults to the machine hostname.
 data_directory = "~/.machinist/worker"
 
+# How many workers this machine will run at once. This is the only number a
+# host declares: how much parallelism a repository deserves is policy, and
+# lives in config.toml as that repository's `parallel`. Each worker gets its
+# own Git worktree, so they never share an index.
+# max_workers = 2
+
 [control_plane]
 url = "http://127.0.0.1:7331"
 token_file = "~/.machinist/server/worker.token"
@@ -14,6 +20,8 @@ models = { luna = "gpt-5.6-luna", terra = "gpt-5.6-terra", sol = "gpt-5.6-sol" }
 command = ["claude", "--print", "--verbose", "--output-format", "stream-json", "--model={{machinist.model}}", "--dangerously-skip-permissions"]
 models = { haiku = "haiku", sonnet = "sonnet", opus = "opus" }
 
-# Register each repository that managed workers may run in.
+# Register each repository that managed workers may run in. `path` points at an
+# existing checkout and always wins; a declaration with no path means this host
+# is willing to serve the repository and will clone it on first dispatch.
 # [repositories.my-project]
 # path = "/absolute/path/to/my-project"

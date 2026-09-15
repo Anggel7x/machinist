@@ -3,13 +3,24 @@ import { Bot, Clock3, Hash, Server, Terminal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { PageHeading, QuietState } from "@/components/ui/page-heading";
+import { groupWorkersByHost } from "@/worker-fleet";
 
+// Workers are grouped by the host that runs them: the host is the unit you
+// operate on, the worker is the unit that holds a lease, and the page would
+// otherwise grow a card every time a host raises max_workers.
 export function WorkersPage({ workers, loaded, error }) {
-  return <Page title="Workers" description="The machines available to pick up and execute work.">{error && <Failure value={error} />}{!loaded && !error ? <Loading description="Checking live worker status." /> : loaded && (workers.length ? <Card className="overflow-hidden">{workers.map((worker) => <article key={worker.instance_id} className="grid gap-4 border-b border-border p-4 last:border-b-0 sm:grid-cols-[minmax(12rem,1fr)_minmax(12rem,1fr)_10rem] sm:items-center sm:px-5">
-    <div className="min-w-0"><div className="flex items-center gap-2"><Server className="size-4 text-muted-foreground" /><h2 className="truncate text-sm font-medium">{worker.name}</h2></div><p className="mt-1 truncate font-mono text-xs text-muted-foreground">{worker.instance_id}</p></div>
-    <div className="flex flex-wrap gap-1.5">{worker.repositories?.length ? worker.repositories.map((repository) => <Badge key={repository} className="border-border bg-muted font-mono text-muted-foreground">{repository}</Badge>) : <span className="text-xs text-muted-foreground">No repositories</span>}</div>
-    <div className="flex items-center justify-between gap-2 sm:flex-col sm:items-end"><Badge className={worker.connected ? "gap-1.5 border-foreground/30 text-foreground" : "gap-1.5 border-dashed border-border text-muted-foreground"}><span className={worker.connected ? "size-1.5 shrink-0 rounded-full bg-current pulse-dot" : "size-1.5 shrink-0 rounded-full border border-current"} />{worker.connected ? "Connected" : "Disconnected"}</Badge><time className="text-xs text-muted-foreground sm:text-right" dateTime={worker.last_seen_at} title={new Date(worker.last_seen_at).toLocaleString()}>Last seen {relativeTime(worker.last_seen_at)}</time></div>
-  </article>)}</Card> : <Empty value="No workers registered." description="Start a worker to register this machine with the control plane." />)}</Page>;
+  const hosts = groupWorkersByHost(workers || []);
+  return <Page title="Workers" description="The machines available to pick up and execute work.">{error && <Failure value={error} />}{!loaded && !error ? <Loading description="Checking live worker status." /> : loaded && (hosts.length ? <div className="space-y-3">{hosts.map((host) => <Card key={host.host} className="overflow-hidden">
+    <header className="flex flex-col gap-3 border-b border-border p-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+      <div className="min-w-0"><div className="flex items-center gap-2"><Server className="size-4 shrink-0 text-muted-foreground" /><h2 className="truncate text-sm font-semibold">{host.host}</h2></div><p className="mt-1 text-xs text-muted-foreground">{host.connected} of {host.total} worker{host.total === 1 ? "" : "s"} live</p></div>
+      <div className="flex flex-wrap gap-1.5">{host.repositories.length ? host.repositories.map((repository) => <Badge key={repository} className="border-border bg-muted font-mono text-muted-foreground">{repository}</Badge>) : <span className="text-xs text-muted-foreground">No repositories</span>}</div>
+    </header>
+    {host.workers.map((worker) => <article key={worker.instance_id} className="grid gap-3 border-b border-border p-4 last:border-b-0 sm:grid-cols-[minmax(12rem,1fr)_minmax(10rem,1fr)_10rem] sm:items-center sm:px-5">
+      <div className="min-w-0"><h3 className="truncate text-sm font-medium">{worker.name}</h3><p className="mt-1 truncate font-mono text-xs text-muted-foreground">{worker.instance_id}</p></div>
+      <div className="flex flex-wrap gap-1.5">{worker.repositories?.length ? worker.repositories.map((repository) => <Badge key={repository} className="border-border font-mono text-muted-foreground">{repository}</Badge>) : <span className="text-xs text-muted-foreground">No repositories</span>}</div>
+      <div className="flex items-center justify-between gap-2 sm:flex-col sm:items-end"><Badge className={worker.connected ? "gap-1.5 border-foreground/30 text-foreground" : "gap-1.5 border-dashed border-border text-muted-foreground"}><span className={worker.connected ? "size-1.5 shrink-0 rounded-full bg-current pulse-dot" : "size-1.5 shrink-0 rounded-full border border-current"} />{worker.connected ? "Connected" : "Disconnected"}</Badge><time className="text-xs text-muted-foreground sm:text-right" dateTime={worker.last_seen_at} title={new Date(worker.last_seen_at).toLocaleString()}>Last seen {relativeTime(worker.last_seen_at)}</time></div>
+    </article>)}
+  </Card>)}</div> : <Empty value="No workers registered." description="Start a worker to register this machine with the control plane." />)}</Page>;
 }
 
 export function CommandsPage() {

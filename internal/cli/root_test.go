@@ -875,3 +875,45 @@ func newCLIRepository(t *testing.T) string {
 	}
 	return root
 }
+
+func TestRepoAddRegistersOneRepositoryWithItsCeiling(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[server]\nworker_token_file = \"token\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+
+	exitCode := Execute(t.Context(), []string{"repo", "add", "anggel7x/tac_restaurant", "--parallel", "3", "--config", configPath}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+
+	definition, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("configuration no longer loads: %v", err)
+	}
+	slugs, err := definition.RepositorySlugs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slugs["tac-restaurant"] != "anggel7x/tac_restaurant" {
+		t.Fatalf("slugs = %v", slugs)
+	}
+	ceilings, err := definition.RepositoryCeilings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ceilings["tac-restaurant"] != 3 {
+		t.Fatalf("ceilings = %v", ceilings)
+	}
+
+	// Adding the same repository twice must not silently produce a second,
+	// conflicting declaration.
+	if exitCode := Execute(t.Context(), []string{"repo", "add", "anggel7x/tac_restaurant", "--config", configPath}, strings.NewReader(""), &stdout, &stderr, "test"); exitCode == 0 {
+		t.Fatalf("expected a duplicate registration to fail, stderr = %q", stderr.String())
+	}
+	if _, err := config.LoadConfig(configPath); err != nil {
+		t.Fatalf("failed registration damaged the configuration: %v", err)
+	}
+}

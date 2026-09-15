@@ -434,6 +434,11 @@ func (s *Server) poll(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	run, err := s.store.poll(request.Context(), input, s.dispatchLimits())
+	if run != nil {
+		// The worker may have no checkout for this repository yet, so it is
+		// told where the repository lives as well as what it is called.
+		run.RepositorySlug = s.repositorySlugs[run.Repository]
+	}
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return

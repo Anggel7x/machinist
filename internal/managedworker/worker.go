@@ -143,7 +143,14 @@ func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
 
 func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
 	completion := protocol.Completion{InstanceID: w.instanceID, LeaseToken: spec.LeaseToken, State: "failed", ExitCode: 1}
-	repository, err := w.config.ResolveRepository(spec.Repository)
+	checkout, err := ensureCheckout(ctx, w.config, spec.Repository, githubCloneURL(spec.RepositorySlug))
+	if err != nil {
+		completion.Error = err.Error()
+		return completion
+	}
+	// Every worker executes in its own worktree, whether this host runs one or
+	// many. Keeping the two cases identical is what makes enabling a pool safe.
+	repository, err := prepareWorkerWorktree(ctx, checkout, w.config.DataDirectory, w.config.Name, spec.Repository)
 	if err != nil {
 		completion.Error = err.Error()
 		return completion

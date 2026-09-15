@@ -762,3 +762,21 @@ func TestWorkerPoolSizeDefaultsToOneAndMustBePositive(t *testing.T) {
 		t.Fatal("expected load to reject a non-positive host cap")
 	}
 }
+
+func TestWorkerRepositoryWithoutPathDeclaresWillingnessWithoutACheckout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.toml")
+	writeTestFile(t, path, "data_directory = \"state\"\n\n[repositories.tac-restaurant]\n")
+
+	worker, err := LoadWorker(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The host still advertises the repository, so the control plane may
+	// dispatch to it; the worker materialises the checkout on first use.
+	if names := worker.RepositoryNames(); len(names) != 1 || names[0] != "tac-restaurant" {
+		t.Fatalf("repository names = %v", names)
+	}
+	if resolved, err := worker.ResolveRepository("tac-restaurant"); err == nil {
+		t.Fatalf("resolved = %q, want an error saying there is no checkout", resolved)
+	}
+}

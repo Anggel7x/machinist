@@ -364,6 +364,9 @@ func (w Worker) ResolveRepository(name string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("repository %q is not configured on this worker", name)
 	}
+	if strings.TrimSpace(repository.Path) == "" {
+		return "", fmt.Errorf("repository %q has no checkout on this worker", name)
+	}
 	return resolveConfigPath(repository.Path, w.configDir)
 }
 
@@ -564,8 +567,14 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 	}
 	worker.DataDirectory = filepath.Clean(worker.DataDirectory)
 	for name, repository := range worker.Repositories {
-		if strings.TrimSpace(name) == "" || strings.TrimSpace(repository.Path) == "" {
-			return Worker{}, errors.New("repository names and paths must be non-empty")
+		if strings.TrimSpace(name) == "" {
+			return Worker{}, errors.New("repository names must be non-empty")
+		}
+		if strings.TrimSpace(repository.Path) == "" {
+			// A declaration without a path means this host is willing to serve
+			// the repository but has no checkout yet; the worker clones it on
+			// first dispatch.
+			continue
 		}
 		path, err := resolveConfigPath(repository.Path, worker.configDir)
 		if err != nil {

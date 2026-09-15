@@ -19,7 +19,16 @@ executor = "codex"
 prompt_file = "prompts/shepherd.md"
 timeout = "120m"
 
+# Register each repository the control plane knows about. `slug` is where it
+# lives on GitHub; `parallel` is its ceiling — how many of its runs may be in
+# flight at once, across every host. Add one with:
+#   machinist repo add owner/my-project --parallel 3
+# [repositories.my-project]
+# slug = "owner/my-project"
+# parallel = 3
+
 # Schedule Shepherd for one configured repository with a trigger like this:
+# (the older [github.repositories] name-to-slug map is still read)
 # [github.repositories]
 # my-project = "owner/my-project"
 #
