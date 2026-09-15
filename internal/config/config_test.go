@@ -655,6 +655,36 @@ func TestShippedMachinistSkillDescribesGitHubIntake(t *testing.T) {
 	}
 }
 
+func TestShippedIssueGuidanceMatchesForemanPlanningSections(t *testing.T) {
+	foreman, err := os.ReadFile(filepath.Join("..", "..", "examples", "prompts", "foreman.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := strings.Join(strings.Fields(string(foreman)), " ")
+	_, after, found := strings.Cut(prompt, "specification using exactly: ")
+	if !found {
+		t.Fatal("foreman prompt no longer names its planning sections")
+	}
+	list, _, _ := strings.Cut(after, ".")
+	var sections []string
+	for _, section := range strings.Split(strings.Replace(list, ", and ", ", ", 1), ", ") {
+		sections = append(sections, "- **"+section+"**:")
+	}
+
+	guidance, err := os.ReadFile(filepath.Join("..", "..", "skills", "machinist", "ISSUE.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	position := 0
+	for _, section := range sections {
+		index := strings.Index(string(guidance)[position:], section)
+		if index < 0 {
+			t.Fatalf("ISSUE.md does not list %q after the previous section", section)
+		}
+		position += index
+	}
+}
+
 func writeTestFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

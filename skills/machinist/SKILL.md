@@ -1,6 +1,6 @@
 ---
 name: machinist
-description: Use Machinist to create, assign, monitor, and resume software tasks. Use when a coding agent needs to work with Machinist, its GitHub issue workflow, lifecycle labels, direct runs, or managed queue.
+description: Use Machinist to create, assign, monitor, and resume software tasks. Use when a coding agent needs to write a GitHub issue for Machinist, or work with its issue workflow, lifecycle labels, direct runs, or managed queue.
 ---
 
 # Machinist
@@ -22,15 +22,7 @@ reviewed, and checked pull request. It never merges the pull request.
 ## Create a task
 
 Reuse a supplied issue when it is open and belongs to the current repository. Otherwise
-create one issue with `gh issue create`. Keep it focused on one observable outcome and
-preserve the user's constraints. Do not invent implementation details that the request
-does not decide.
-
-```sh
-gh issue create --title "<short outcome>" --body "<problem, outcome, constraints, and acceptance evidence>"
-```
-
-Use the issue URL returned by GitHub for every later command.
+write one issue following [`ISSUE.md`](ISSUE.md), which holds the shape the foreman expects.
 
 ## Assign a task
 
