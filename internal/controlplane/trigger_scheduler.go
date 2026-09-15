@@ -19,10 +19,10 @@ const queuedGitHubLabel = "machinist:queued"
 const mirrorPageSize = 100
 
 type githubTriggerClient interface {
-	SearchRequestedIssues(context.Context, []string, string, int) ([]GitHubCandidate, error)
+	SearchRequestedIssues(context.Context, []string, string, string, int) ([]GitHubCandidate, error)
 	IssueDetails(context.Context, string, int, string) (GitHubIssueDetails, error)
 	Permission(context.Context, string, string) (string, error)
-	AcknowledgeRequest(context.Context, string, int, string, string, bool) error
+	AcknowledgeRequest(context.Context, string, int, string, string, string, bool) error
 	ListPullRequests(context.Context, string, int) ([]PullRequestMirror, error)
 	ListIssues(context.Context, string, int) ([]IssueMirror, error)
 }
@@ -188,7 +188,7 @@ func (s *Server) processGitHubTrigger(ctx context.Context, trigger config.Resolv
 		}
 	}
 
-	candidates, searchErr := s.github.SearchRequestedIssues(ctx, repositories, trigger.Label, maxGitHubCandidates)
+	candidates, searchErr := s.github.SearchRequestedIssues(ctx, repositories, trigger.Label, trigger.Subject, maxGitHubCandidates)
 	if searchErr != nil {
 		failures = append(failures, searchErr)
 	} else {
@@ -210,17 +210,17 @@ func (s *Server) processGitHubCandidate(ctx context.Context, trigger config.Reso
 	if err != nil {
 		return err
 	}
-	if !GitHubIssueIsEligible(details, repositories) || !hasGitHubLabel(details.Labels, trigger.Label) {
+	if !GitHubIssueIsEligible(details, repositories, trigger.Subject) || !hasGitHubLabel(details.Labels, trigger.Label) {
 		return nil
 	}
 	return s.processGitHubDetails(ctx, trigger, generation, repositories, trigger.Label, details)
 }
 
 func (s *Server) processGitHubDetails(ctx context.Context, trigger config.ResolvedTrigger, generation string, repositories []string, requestLabel string, details GitHubIssueDetails) error {
-	if !GitHubIssueIsEligible(details, repositories) {
+	if !GitHubIssueIsEligible(details, repositories, trigger.Subject) {
 		return nil
 	}
-	issueURL := fmt.Sprintf("https://github.com/%s/issues/%d", details.Repository, details.Number)
+	issueURL := GitHubSubjectURL(details.Repository, details.Number, trigger.Subject)
 	request := GitHubTriggerRequest{
 		TriggerIdentity: trigger.Identity, OccurrenceKey: details.RequestedEvent.OccurrenceKey, ConfigGeneration: generation,
 		Repository: details.Repository, IssueNumber: details.Number, Subject: issueURL,
@@ -241,7 +241,7 @@ func (s *Server) processGitHubDetails(ctx context.Context, trigger config.Resolv
 	if !ok {
 		return nil
 	}
-	prompt := "Complete " + issueURL
+	prompt := config.GitHubRequestPrompt(trigger.Prompt, issueURL)
 	command, renderErr := config.RenderPrompt(trigger.Command, prompt)
 	if renderErr != nil {
 		return renderErr
@@ -283,7 +283,7 @@ func (s *Server) reconcileGitHubRequest(ctx context.Context, trigger config.Reso
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(details.State, "open") || details.IsPullRequest {
+	if !strings.EqualFold(details.State, "open") || details.IsPullRequest != (trigger.Subject == config.GitHubPullRequestSubject) {
 		return s.store.CompleteGitHubTriggerReconciliation(ctx, request.TriggerIdentity, request.OccurrenceKey, request.ConfigGeneration)
 	}
 	_, repositoryConfigured := logicalGitHubRepository(trigger.GitHubRepositories, details.Repository)
@@ -310,7 +310,7 @@ func (s *Server) reconcileGitHubRequest(ctx context.Context, trigger config.Reso
 	if !hasGitHubLabel(details.Labels, requestLabel) {
 		return s.store.CompleteGitHubTriggerReconciliation(ctx, request.TriggerIdentity, request.OccurrenceKey, request.ConfigGeneration)
 	}
-	if err := s.github.AcknowledgeRequest(ctx, request.Repository, request.IssueNumber, requestLabel, queuedGitHubLabel, request.State == "admitted"); err != nil {
+	if err := s.github.AcknowledgeRequest(ctx, request.Repository, request.IssueNumber, trigger.Subject, requestLabel, queuedGitHubLabel, request.State == "admitted"); err != nil {
 		return err
 	}
 	after, err := s.github.IssueDetails(ctx, request.Repository, request.IssueNumber, requestLabel)

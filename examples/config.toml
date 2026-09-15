@@ -38,3 +38,15 @@ timeout = "120m"
 # repository = "my-project"
 # command = "shepherd"
 # prompt = "Run the Shepherd queue for my-project with max_actions=3. Perform at most 3 mutating actions in this run."
+#
+# Or run it on demand: adding a label to a pull request admits one job whose
+# prompt is `prompt` followed by the pull request URL. `on` defaults to
+# "issue"; without `repository` a GitHub trigger watches every registered
+# repository. The control plane's Triggers page registers these too.
+# [triggers.github.shepherd-my-project]
+# every = "1m"
+# label = "machinist:shepherd"
+# on = "pull_request"
+# repository = "my-project"
+# command = "shepherd"
+# prompt = "Run the Shepherd queue for my-project with max_actions=3, limited to the pull request below."

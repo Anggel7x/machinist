@@ -27,6 +27,27 @@ path = "/absolute/path/to/my-project"
 Managed triggers select one command with `command = "audit"`. Model selection remains
 available when the executor command includes `{{machinist.model}}`.
 
+## GitHub triggers
+
+A GitHub trigger admits one job when its label is added to an open issue, or to an open
+pull request with `on = "pull_request"`. The job's prompt is `Complete <url>`, or `prompt`
+followed by a blank line and the URL when `prompt` is set. Without `repository` the trigger
+watches every registered repository.
+
+```toml
+[triggers.github.shepherd-my-project]
+every = "1m"
+label = "machinist:shepherd"
+on = "pull_request"
+repository = "my-project"
+command = "shepherd"
+prompt = "Run the Shepherd queue with max_actions=3, limited to the pull request below."
+```
+
+Two GitHub triggers may share a label only when no repository is watched by both. The
+control plane's **Triggers** page registers a GitHub trigger on a registered repository
+and applies it without a restart.
+
 ## Repositories
 
 Register each repository with the control plane. `slug` is where it lives on GitHub, and

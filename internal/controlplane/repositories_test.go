@@ -185,3 +185,52 @@ func pollRun(t *testing.T, endpoint string, request protocol.PollRequest) *proto
 	}
 	return polled.Run
 }
+
+func TestServerRegistersGitHubTriggerOnARegisteredRepository(t *testing.T) {
+	_, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+	status := getStatus(t, webServer.URL)
+	headers := map[string]string{"Origin": webServer.URL, "X-Machinist-CSRF": status.CSRFToken}
+	repository := postJSON(t, webServer.URL+"/api/v1/repositories", map[string]any{"slug": "acme/web"}, headers)
+	repository.Body.Close()
+
+	forged := postJSON(t, webServer.URL+"/api/v1/triggers", map[string]any{"repository": "web", "label": "go", "command": "plan"}, map[string]string{"Origin": webServer.URL})
+	forged.Body.Close()
+	if forged.StatusCode != http.StatusForbidden {
+		t.Fatalf("registration without CSRF status = %d", forged.StatusCode)
+	}
+
+	body := map[string]any{"repository": "web", "on": "pull_request", "label": "machinist:shepherd", "command": "plan", "prompt": "Shepherd it with max_actions=8."}
+	created := postJSON(t, webServer.URL+"/api/v1/triggers", body, headers)
+	var registered config.GitHubTriggerRegistration
+	if err := json.NewDecoder(created.Body).Decode(&registered); err != nil {
+		t.Fatal(err)
+	}
+	created.Body.Close()
+	if created.StatusCode != http.StatusCreated || registered.Name != "plan-web-pull-requests" {
+		t.Fatalf("status = %d, registered = %#v", created.StatusCode, registered)
+	}
+
+	status = getStatus(t, webServer.URL)
+	if len(status.TriggerDefinitions) != 1 || status.TriggerDefinitions[0].Identity != "github/plan-web-pull-requests" || status.TriggerDefinitions[0].On != "pull_request" || strings.Join(status.TriggerDefinitions[0].Repositories, ",") != "web" {
+		t.Fatalf("definitions = %#v", status.TriggerDefinitions)
+	}
+	if len(status.Triggers) != 1 || status.Triggers[0].Identity != "github/plan-web-pull-requests" {
+		t.Fatalf("durable triggers = %#v", status.Triggers)
+	}
+
+	for _, test := range []struct {
+		body map[string]any
+		want int
+	}{
+		{body: body, want: http.StatusConflict},
+		{body: map[string]any{"name": "again", "repository": "web", "on": "pull_request", "label": "machinist:shepherd", "command": "plan"}, want: http.StatusBadRequest},
+		{body: map[string]any{"repository": "mobile", "label": "go", "command": "plan"}, want: http.StatusBadRequest},
+	} {
+		response := postJSON(t, webServer.URL+"/api/v1/triggers", test.body, headers)
+		response.Body.Close()
+		if response.StatusCode != test.want {
+			t.Fatalf("%v status = %d, want %d", test.body, response.StatusCode, test.want)
+		}
+	}
+}

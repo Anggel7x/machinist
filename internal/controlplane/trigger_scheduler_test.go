@@ -39,7 +39,7 @@ type fakeGitHubTriggerClient struct {
 	permissionActors   []string
 }
 
-func (f *fakeGitHubTriggerClient) SearchRequestedIssues(ctx context.Context, _ []string, label string, limit int) ([]GitHubCandidate, error) {
+func (f *fakeGitHubTriggerClient) SearchRequestedIssues(ctx context.Context, _ []string, label, _ string, limit int) ([]GitHubCandidate, error) {
 	if f.searchStarted != nil {
 		select {
 		case f.searchStarted <- struct{}{}:
@@ -111,7 +111,7 @@ func (f *fakeGitHubTriggerClient) Permission(_ context.Context, _, actor string)
 	return f.permission, nil
 }
 
-func (f *fakeGitHubTriggerClient) AcknowledgeRequest(_ context.Context, _ string, number int, requestedLabel, queuedLabel string, accepted bool) error {
+func (f *fakeGitHubTriggerClient) AcknowledgeRequest(_ context.Context, _ string, number int, _, requestedLabel, queuedLabel string, accepted bool) error {
 	f.replaceCalls++
 	if f.replaceErr != nil {
 		return f.replaceErr
@@ -766,5 +766,36 @@ func TestMirrorGitHubOutcomesCachesEveryRegisteredRepository(t *testing.T) {
 	}
 	if issue, ok := issues[mirrorKey{repository: "machinist", number: 396}]; !ok || len(issue.Labels) != 1 || issue.Labels[0] != "serial" {
 		t.Fatalf("mirrored issues = %#v", issues)
+	}
+}
+
+func TestManagedGitHubTriggerAdmitsLabelledPullRequestWithItsPrompt(t *testing.T) {
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	store := openManagedTriggerTestStore(t, &clock)
+	trigger := githubTestTrigger()
+	trigger.Identity, trigger.Label, trigger.Subject = "github/shepherd", "machinist:shepherd", config.GitHubPullRequestSubject
+	trigger.Prompt = "Shepherd this pull request with max_actions=8."
+	if err := store.SyncTriggers(t.Context(), []TriggerDefinition{{Identity: trigger.Identity, Family: trigger.Family, ConfigSignature: trigger.Signature, NextDueAt: clock}}); err != nil {
+		t.Fatal(err)
+	}
+	event := &GitHubLabelEvent{ID: "9", Actor: "owner", CreatedAt: clock, OccurrenceKey: "github.com:9"}
+	pullRequest := GitHubCandidate{Repository: "owainlewis/machinist", Number: 59, Title: "Fix checkout", URL: "https://github.com/owainlewis/machinist/pull/59", State: "open", IsPullRequest: true, CreatedAt: clock}
+	client := &fakeGitHubTriggerClient{
+		candidates: []GitHubCandidate{pullRequest},
+		details:    GitHubIssueDetails{GitHubCandidate: pullRequest, Labels: []string{"machinist:shepherd"}, RequestedEvent: event},
+		permission: "write",
+	}
+	server := &Server{store: store, triggers: []config.ResolvedTrigger{trigger}, github: client, now: func() time.Time { return clock }}
+
+	if err := processManagedTriggers(t.Context(), server); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Shepherd this pull request with max_actions=8.\n\nhttps://github.com/owainlewis/machinist/pull/59"
+	if len(snapshot.Jobs) != 1 || snapshot.Jobs[0].Prompt != want || snapshot.Jobs[0].Repository != "machinist" || snapshot.Jobs[0].TriggerSubject != "https://github.com/owainlewis/machinist/pull/59" || client.replaceCalls != 1 {
+		t.Fatalf("jobs = %#v, label replacements = %d", snapshot.Jobs, client.replaceCalls)
 	}
 }

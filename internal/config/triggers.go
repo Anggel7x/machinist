@@ -46,7 +46,7 @@ func validateTriggerKeys(raw map[string]any) error {
 		return errors.New("triggers must be a table")
 	}
 	allowed := map[string]map[string]bool{
-		"github":   {"every": true, "label": true, "command": true, "model": true},
+		"github":   {"every": true, "label": true, "on": true, "repository": true, "command": true, "model": true, "prompt": true},
 		"interval": {"every": true, "repository": true, "command": true, "model": true, "prompt": true},
 		"cron":     {"schedule": true, "timezone": true, "repository": true, "command": true, "model": true, "prompt": true},
 	}
@@ -86,7 +86,6 @@ func (c Config) ResolveTriggers() ([]ResolvedTrigger, error) {
 		return nil, err
 	}
 	result := make([]ResolvedTrigger, 0, len(c.Triggers.GitHub)+len(c.Triggers.Interval)+len(c.Triggers.Cron))
-	seenLabels := make(map[string]string, len(c.Triggers.GitHub))
 
 	for _, name := range sortedMapKeys(c.Triggers.GitHub) {
 		identity, err := triggerIdentity("github", name)
@@ -105,25 +104,43 @@ func (c Config) ResolveTriggers() ([]ResolvedTrigger, error) {
 		if strings.EqualFold(label, queuedGitHubLabel) {
 			return nil, fmt.Errorf("trigger %q label must differ from reserved label %q", identity, queuedGitHubLabel)
 		}
-		canonicalLabel := strings.ToLower(label)
-		if previous, ok := seenLabels[canonicalLabel]; ok {
-			return nil, fmt.Errorf("trigger %q uses the same case-insensitive label as trigger %q", identity, previous)
-		}
-		seenLabels[canonicalLabel] = identity
 		if len(repositories) == 0 {
 			return nil, fmt.Errorf("trigger %q requires at least one github.repositories entry", identity)
+		}
+		subject, err := triggerSubject(identity, definition.On)
+		if err != nil {
+			return nil, err
+		}
+		watched, repository := maps.Clone(repositories), ""
+		if definition.Repository != "" {
+			var slug string
+			if repository, slug, err = resolveTriggerRepository(identity, definition.Repository, repositories); err != nil {
+				return nil, err
+			}
+			watched = map[string]string{repository: slug}
+		}
+		// One label may start different work in different repositories, but
+		// two triggers must never both claim the same labelled issue.
+		for _, previous := range result {
+			if strings.EqualFold(previous.Label, label) && sharesRepository(previous.GitHubRepositories, watched) {
+				return nil, fmt.Errorf("trigger %q uses the same case-insensitive label as trigger %q on a repository both watch", identity, previous.Identity)
+			}
+		}
+		prompt := definition.Prompt
+		if len(prompt) > maxInputPromptBytes {
+			return nil, fmt.Errorf("trigger %q prompt exceeds %d bytes", identity, maxInputPromptBytes)
 		}
 		selection, command, err := c.resolveTriggerSelection(identity, definition.TriggerSelection, "")
 		if err != nil {
 			return nil, err
 		}
-		if _, err := RenderPrompt(command, maximumGitHubIssuePrompt()); err != nil {
+		if _, err := RenderPrompt(command, GitHubRequestPrompt(prompt, maximumGitHubIssueURL())); err != nil {
 			return nil, fmt.Errorf("trigger %q: %w", identity, err)
 		}
 		resolved := ResolvedTrigger{
-			Identity: identity, Family: "github", Name: name,
-			GitHubRepositories: maps.Clone(repositories), Every: every, Label: label,
-			SelectionName: selection, Model: strings.TrimSpace(definition.Model), Command: command,
+			Identity: identity, Family: "github", Name: name, Repository: repository,
+			GitHubRepositories: watched, Every: every, Label: label, Subject: subject,
+			SelectionName: selection, Model: strings.TrimSpace(definition.Model), Prompt: prompt, Command: command,
 		}
 		if result, err = appendTrigger(result, resolved); err != nil {
 			return nil, err
@@ -195,10 +212,39 @@ func (c Config) ResolveTriggers() ([]ResolvedTrigger, error) {
 	return result, nil
 }
 
-// maximumGitHubIssuePrompt matches the longest issue prompt the GitHub adapter
-// can construct from a valid repository slug and a positive 64-bit issue number.
-func maximumGitHubIssuePrompt() string {
-	return "Complete https://github.com/" + strings.Repeat("o", 39) + "/" + strings.Repeat("r", 100) + "/issues/" + strings.Repeat("9", 19)
+// maximumGitHubIssueURL is the longest subject URL the GitHub adapter can
+// construct from a valid repository slug and a positive 64-bit number.
+func maximumGitHubIssueURL() string {
+	return "https://github.com/" + strings.Repeat("o", 39) + "/" + strings.Repeat("r", 100) + "/issues/" + strings.Repeat("9", 19)
+}
+
+// GitHubRequestPrompt is the prompt a GitHub trigger admits for one labelled
+// issue or pull request.
+func GitHubRequestPrompt(prompt, subjectURL string) string {
+	if strings.TrimSpace(prompt) == "" {
+		return "Complete " + subjectURL
+	}
+	return strings.TrimRight(prompt, "\n") + "\n\n" + subjectURL
+}
+
+func triggerSubject(identity, input string) (string, error) {
+	switch input {
+	case "", GitHubIssueSubject:
+		return GitHubIssueSubject, nil
+	case GitHubPullRequestSubject:
+		return GitHubPullRequestSubject, nil
+	default:
+		return "", fmt.Errorf("trigger %q on must be %q or %q", identity, GitHubIssueSubject, GitHubPullRequestSubject)
+	}
+}
+
+func sharesRepository(left, right map[string]string) bool {
+	for name := range left {
+		if _, ok := right[name]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveGitHubRepositories(input map[string]string) (map[string]string, error) {
@@ -343,14 +389,17 @@ func triggerSignature(trigger ResolvedTrigger) (string, error) {
 	}
 	body, err := json.Marshal(struct {
 		Identity, Family, Repository, GitHubRepository, Schedule, Timezone, Label string
-		Every                                                                     int64
-		SelectionName, Model, Prompt                                              string
-		Repositories                                                              []repositoryPair
-		CommandHash                                                               string
+		// Subject is omitted for issues so triggers configured before
+		// pull request subjects existed keep their signature and state.
+		Subject                      string `json:",omitempty"`
+		Every                        int64
+		SelectionName, Model, Prompt string
+		Repositories                 []repositoryPair
+		CommandHash                  string
 	}{
 		Identity: trigger.Identity, Family: trigger.Family, Repository: trigger.Repository,
 		GitHubRepository: trigger.GitHubRepository, Schedule: trigger.Schedule, Timezone: trigger.Timezone,
-		Label: trigger.Label, Every: int64(trigger.Every),
+		Label: trigger.Label, Subject: signatureSubject(trigger.Subject), Every: int64(trigger.Every),
 		SelectionName: trigger.SelectionName, Model: trigger.Model, Prompt: trigger.Prompt,
 		Repositories: repositories, CommandHash: trigger.Command.Name + ":" + trigger.Command.Hash,
 	})
@@ -359,4 +408,11 @@ func triggerSignature(trigger ResolvedTrigger) (string, error) {
 	}
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func signatureSubject(subject string) string {
+	if subject == GitHubIssueSubject {
+		return ""
+	}
+	return subject
 }

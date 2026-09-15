@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/owainlewis/machinist/internal/config"
 )
 
 type scriptedGitHubResult struct {
@@ -47,7 +49,7 @@ func TestGitHubCLISearchCombinesRepositoriesAndOrdersOldest(t *testing.T) {
   {"number":2,"repository":{"nameWithOwner":"owner/alpha"},"state":"open","url":"https://github.com/owner/alpha/issues/2","isPullRequest":false,"createdAt":"2026-01-01T00:00:00Z"}
 ]`})
 
-	candidates, err := cli.SearchRequestedIssues(context.Background(), []string{"Owner/Zed", "owner/alpha", "OWNER/ZED"}, "machinist:requested", 100)
+	candidates, err := cli.SearchRequestedIssues(context.Background(), []string{"Owner/Zed", "owner/alpha", "OWNER/ZED"}, "machinist:requested", "issue", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +80,7 @@ func TestGitHubCLISearchBatchesAndAppliesGlobalLimit(t *testing.T) {
 	base := []string{"search", "issues", "--label", "requested", "--state", "open", "--sort", "created", "--order", "asc", "--limit", "100", "--json", "number,repository,state,url,isPullRequest,createdAt"}
 	cli.maxArgumentBytes = argumentBytes(base) + len("--repo") + 1 + len("o/a") + 1
 
-	candidates, err := cli.SearchRequestedIssues(context.Background(), []string{"o/c", "o/b", "o/a"}, "requested", 2)
+	candidates, err := cli.SearchRequestedIssues(context.Background(), []string{"o/c", "o/b", "o/a"}, "requested", "issue", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +96,7 @@ func TestGitHubCLISearchDeduplicatesCandidatesAcrossBatches(t *testing.T) {
 	duplicate := `[{"number":1,"repository":{"nameWithOwner":"o/a"},"state":"open","url":"https://github.com/o/a/issues/1","isPullRequest":false,"createdAt":"2026-01-01T00:00:00Z"}]`
 	cli, _ := newScriptedGitHubCLI(scriptedGitHubResult{stdout: duplicate}, scriptedGitHubResult{stdout: duplicate})
 	cli.maxArgumentBytes = 1
-	candidates, err := cli.SearchRequestedIssues(context.Background(), []string{"o/a", "o/b"}, "requested", 100)
+	candidates, err := cli.SearchRequestedIssues(context.Background(), []string{"o/a", "o/b"}, "requested", "issue", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +211,7 @@ func TestGitHubCLIIssueDetailsIdentifiesPullRequestAndMissingEvent(t *testing.T)
 	if !details.IsPullRequest || details.RequestedEvent != nil {
 		t.Fatalf("unexpected details: %+v", details)
 	}
-	if GitHubIssueIsEligible(details, []string{"o/r"}) {
+	if GitHubIssueIsEligible(details, []string{"o/r"}, "issue") {
 		t.Fatal("closed pull request was eligible")
 	}
 }
@@ -219,10 +221,10 @@ func TestGitHubIssueEligibilityRejectsUnconfiguredRepository(t *testing.T) {
 		GitHubCandidate: GitHubCandidate{Repository: "o/r", State: "OPEN"},
 		RequestedEvent:  &GitHubLabelEvent{ID: "1"},
 	}
-	if !GitHubIssueIsEligible(details, []string{"O/R"}) {
+	if !GitHubIssueIsEligible(details, []string{"O/R"}, "issue") {
 		t.Fatal("configured open issue was rejected")
 	}
-	if GitHubIssueIsEligible(details, []string{"o/other"}) {
+	if GitHubIssueIsEligible(details, []string{"o/other"}, "issue") {
 		t.Fatal("unconfigured repository was eligible")
 	}
 }
@@ -266,7 +268,7 @@ func TestGitHubCLIReplaceLabelIsRepairableAfterPartialFailure(t *testing.T) {
 		scriptedGitHubResult{},
 		scriptedGitHubResult{stderr: "temporary API failure", err: errors.New("exit 1")},
 	)
-	err := cli.AcknowledgeRequest(context.Background(), "o/r", 7, "machinist:requested", "machinist:queued", true)
+	err := cli.AcknowledgeRequest(context.Background(), "o/r", 7, "issue", "machinist:requested", "machinist:queued", true)
 	if err == nil {
 		t.Fatal("expected partial label update failure")
 	}
@@ -285,7 +287,7 @@ func TestGitHubCLIRejectsRequestWithoutAddingQueuedLabel(t *testing.T) {
 	cli, runner := newScriptedGitHubCLI(
 		scriptedGitHubResult{},
 	)
-	if err := cli.AcknowledgeRequest(context.Background(), "o/r", 7, "machinist:requested", "machinist:queued", false); err != nil {
+	if err := cli.AcknowledgeRequest(context.Background(), "o/r", 7, "issue", "machinist:requested", "machinist:queued", false); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 1 {
@@ -298,7 +300,7 @@ func TestGitHubCLIRejectsRequestWithoutAddingQueuedLabel(t *testing.T) {
 
 func TestGitHubCLIReplaceLabelRejectsCaseInsensitiveCollision(t *testing.T) {
 	cli, runner := newScriptedGitHubCLI()
-	err := cli.AcknowledgeRequest(context.Background(), "o/r", 7, "Machinist:Queued", "machinist:queued", true)
+	err := cli.AcknowledgeRequest(context.Background(), "o/r", 7, "issue", "Machinist:Queued", "machinist:queued", true)
 	if err == nil || !strings.Contains(err.Error(), "must differ") {
 		t.Fatalf("error = %v", err)
 	}
@@ -319,7 +321,7 @@ func TestGitHubCLIClassifiesAuthenticationAndRateLimits(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			cli, _ := newScriptedGitHubCLI(scriptedGitHubResult{stderr: test.stderr, err: errors.New("exit status 1")})
-			_, err := cli.SearchRequestedIssues(context.Background(), []string{"o/r"}, "requested", 100)
+			_, err := cli.SearchRequestedIssues(context.Background(), []string{"o/r"}, "requested", "issue", 100)
 			var cliErr *GitHubCLIError
 			if !errors.As(err, &cliErr) || cliErr.Kind != test.kind {
 				t.Fatalf("error = %#v, want kind %q", err, test.kind)
@@ -341,7 +343,7 @@ func (blockingGitHubRunner) Run(ctx context.Context, _ string, _ []string) ([]by
 func TestGitHubCLIClassifiesTimeout(t *testing.T) {
 	cli := NewGitHubCLI("test-gh", time.Millisecond)
 	cli.runner = blockingGitHubRunner{}
-	_, err := cli.SearchRequestedIssues(context.Background(), []string{"o/r"}, "requested", 100)
+	_, err := cli.SearchRequestedIssues(context.Background(), []string{"o/r"}, "requested", "issue", 100)
 	var cliErr *GitHubCLIError
 	if !errors.As(err, &cliErr) || cliErr.Kind != GitHubCLIErrorTimeout {
 		t.Fatalf("error = %#v, want timeout", err)
@@ -350,7 +352,7 @@ func TestGitHubCLIClassifiesTimeout(t *testing.T) {
 
 func TestGitHubCLIRejectsMalformedOutput(t *testing.T) {
 	cli, _ := newScriptedGitHubCLI(scriptedGitHubResult{stdout: `{"not":"an array"}`})
-	_, err := cli.SearchRequestedIssues(context.Background(), []string{"o/r"}, "requested", 100)
+	_, err := cli.SearchRequestedIssues(context.Background(), []string{"o/r"}, "requested", "issue", 100)
 	var cliErr *GitHubCLIError
 	if !errors.As(err, &cliErr) || cliErr.Kind != GitHubCLIErrorMalformed {
 		t.Fatalf("error = %#v, want malformed output", err)
@@ -359,13 +361,13 @@ func TestGitHubCLIRejectsMalformedOutput(t *testing.T) {
 
 func TestGitHubCLIRejectsUnsafeInputsBeforeExecution(t *testing.T) {
 	cli, runner := newScriptedGitHubCLI()
-	if _, err := cli.SearchRequestedIssues(context.Background(), []string{"o/r;touch bad"}, "requested", 100); err == nil {
+	if _, err := cli.SearchRequestedIssues(context.Background(), []string{"o/r;touch bad"}, "requested", "issue", 100); err == nil {
 		t.Fatal("unsafe repository was accepted")
 	}
 	if _, err := cli.Permission(context.Background(), "o/r", "name/path"); err == nil {
 		t.Fatal("unsafe actor was accepted")
 	}
-	if _, err := cli.SearchRequestedIssues(context.Background(), []string{"o/r"}, "requested,urgent", 100); err == nil {
+	if _, err := cli.SearchRequestedIssues(context.Background(), []string{"o/r"}, "requested,urgent", "issue", 100); err == nil {
 		t.Fatal("comma-separated label was accepted")
 	}
 	if len(runner.calls) != 0 {
@@ -491,5 +493,33 @@ func TestGitHubCLIDoesNotRequestTheCommitsConnection(t *testing.T) {
 	// is cheap insurance against it being added back as "just one more field".
 	if strings.Contains(pullRequestFields, "commits") {
 		t.Fatalf("pull request fields must not request the commits connection: %s", pullRequestFields)
+	}
+}
+
+func TestGitHubCLIHandlesPullRequestSubjects(t *testing.T) {
+	cli, runner := newScriptedGitHubCLI(
+		scriptedGitHubResult{stdout: `[{"number":7,"repository":{"nameWithOwner":"o/r"},"state":"open","url":"https://github.com/o/r/pull/7","isPullRequest":true,"createdAt":"2026-01-01T00:00:00Z"}]`},
+		scriptedGitHubResult{},
+		scriptedGitHubResult{},
+	)
+	candidates, err := cli.SearchRequestedIssues(context.Background(), []string{"o/r"}, "machinist:shepherd", config.GitHubPullRequestSubject, 100)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("candidates = %#v, error = %v", candidates, err)
+	}
+	if got := strings.Join(runner.calls[0], " "); !strings.HasPrefix(got, "test-gh search prs --label machinist:shepherd") {
+		t.Fatalf("search call = %s", got)
+	}
+	if err := cli.AcknowledgeRequest(context.Background(), "o/r", 7, config.GitHubPullRequestSubject, "machinist:shepherd", "machinist:queued", true); err != nil {
+		t.Fatal(err)
+	}
+	for index, want := range []string{"test-gh pr edit https://github.com/o/r/pull/7 --add-label machinist:queued", "test-gh pr edit https://github.com/o/r/pull/7 --remove-label machinist:shepherd"} {
+		if got := strings.Join(runner.calls[index+1], " "); got != want {
+			t.Fatalf("label call %d = %s, want %s", index, got, want)
+		}
+	}
+
+	pullRequest := GitHubIssueDetails{GitHubCandidate: GitHubCandidate{Repository: "o/r", State: "open", IsPullRequest: true}, RequestedEvent: &GitHubLabelEvent{ID: "1"}}
+	if !GitHubIssueIsEligible(pullRequest, []string{"o/r"}, config.GitHubPullRequestSubject) || GitHubIssueIsEligible(pullRequest, []string{"o/r"}, config.GitHubIssueSubject) {
+		t.Fatal("a labelled pull request must satisfy only a pull request trigger")
 	}
 }

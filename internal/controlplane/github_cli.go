@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/owainlewis/machinist/internal/config"
 )
 
 const (
@@ -119,10 +121,11 @@ func (e *GitHubCLIError) Error() string {
 
 func (e *GitHubCLIError) Unwrap() error { return e.Err }
 
-// SearchRequestedIssues returns at most the 100 oldest matching issues across
-// all configured repositories. Repositories are sorted and combined into one
-// gh search whenever the process argument limit permits it.
-func (g *GitHubCLI) SearchRequestedIssues(ctx context.Context, repositories []string, label string, limit int) ([]GitHubCandidate, error) {
+// SearchRequestedIssues returns at most the 100 oldest matching issues, or
+// pull requests when subject is config.GitHubPullRequestSubject, across all
+// configured repositories. Repositories are sorted and combined into one gh
+// search whenever the process argument limit permits it.
+func (g *GitHubCLI) SearchRequestedIssues(ctx context.Context, repositories []string, label, subject string, limit int) ([]GitHubCandidate, error) {
 	repositories, err := normalizeGitHubRepositories(repositories)
 	if err != nil {
 		return nil, err
@@ -137,8 +140,12 @@ func (g *GitHubCLI) SearchRequestedIssues(ctx context.Context, repositories []st
 		limit = maxGitHubCandidates
 	}
 
+	kind, operation := "issues", "search issues"
+	if subject == config.GitHubPullRequestSubject {
+		kind, operation = "prs", "search pull requests"
+	}
 	baseArgs := []string{
-		"search", "issues", "--label", label,
+		"search", kind, "--label", label,
 		"--state", "open",
 		"--sort", "created", "--order", "asc", "--limit", strconv.Itoa(maxGitHubCandidates),
 		"--json", "number,repository,state,url,isPullRequest,createdAt",
@@ -150,13 +157,13 @@ func (g *GitHubCLI) SearchRequestedIssues(ctx context.Context, repositories []st
 		for _, repository := range batch {
 			args = append(args, "--repo", repository)
 		}
-		stdout, err := g.run(ctx, "search issues", args)
+		stdout, err := g.run(ctx, operation, args)
 		if err != nil {
 			return nil, err
 		}
 		candidates, err := parseGitHubCandidates(stdout)
 		if err != nil {
-			return nil, malformedGitHubOutput("search issues", err, stdout)
+			return nil, malformedGitHubOutput(operation, err, stdout)
 		}
 		all = append(all, candidates...)
 	}
@@ -268,7 +275,7 @@ func GitHubPermissionCanWrite(permission string) bool {
 // AcknowledgeRequest removes the request label after durable intake. Accepted
 // requests receive the queued lifecycle label first. The scheduler owns durable
 // reconciliation and re-reads the timeline after this mutation.
-func (g *GitHubCLI) AcknowledgeRequest(ctx context.Context, repository string, number int, requestedLabel, queuedLabel string, accepted bool) error {
+func (g *GitHubCLI) AcknowledgeRequest(ctx context.Context, repository string, number int, subject, requestedLabel, queuedLabel string, accepted bool) error {
 	repository, err := normalizeGitHubRepository(repository)
 	if err != nil {
 		return err
@@ -285,21 +292,35 @@ func (g *GitHubCLI) AcknowledgeRequest(ctx context.Context, repository string, n
 	if strings.EqualFold(requestedLabel, queuedLabel) {
 		return errors.New("requested and queued labels must differ")
 	}
-	issueURL := fmt.Sprintf("https://github.com/%s/issues/%d", repository, number)
+	kind := "issue"
+	if subject == config.GitHubPullRequestSubject {
+		kind = "pr"
+	}
+	subjectURL := GitHubSubjectURL(repository, number, subject)
 	if accepted {
-		if _, err := g.run(ctx, "add queued label", []string{"issue", "edit", issueURL, "--add-label", queuedLabel}); err != nil {
+		if _, err := g.run(ctx, "add queued label", []string{kind, "edit", subjectURL, "--add-label", queuedLabel}); err != nil {
 			return err
 		}
 	}
-	if _, err := g.run(ctx, "remove request label", []string{"issue", "edit", issueURL, "--remove-label", requestedLabel}); err != nil {
+	if _, err := g.run(ctx, "remove request label", []string{kind, "edit", subjectURL, "--remove-label", requestedLabel}); err != nil {
 		return err
 	}
 	return nil
 }
 
-// GitHubIssueIsEligible applies local intake guards before admission.
-func GitHubIssueIsEligible(issue GitHubIssueDetails, configuredRepositories []string) bool {
-	if !strings.EqualFold(issue.State, "open") || issue.IsPullRequest || issue.RequestedEvent == nil {
+// GitHubSubjectURL is the web URL of an issue, or of a pull request when
+// subject is config.GitHubPullRequestSubject.
+func GitHubSubjectURL(repository string, number int, subject string) string {
+	if subject == config.GitHubPullRequestSubject {
+		return fmt.Sprintf("https://github.com/%s/pull/%d", repository, number)
+	}
+	return fmt.Sprintf("https://github.com/%s/issues/%d", repository, number)
+}
+
+// GitHubIssueIsEligible applies local intake guards before admission. The
+// labelled item must be the kind the trigger watches.
+func GitHubIssueIsEligible(issue GitHubIssueDetails, configuredRepositories []string, subject string) bool {
+	if !strings.EqualFold(issue.State, "open") || issue.IsPullRequest != (subject == config.GitHubPullRequestSubject) || issue.RequestedEvent == nil {
 		return false
 	}
 	for _, repository := range configuredRepositories {

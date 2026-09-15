@@ -86,7 +86,21 @@ type statusResponse struct {
 	Commands               []string                        `json:"commands"`
 	Repositories           []string                        `json:"repositories"`
 	RegisteredRepositories []config.RepositoryRegistration `json:"registered_repositories"`
+	TriggerDefinitions     []triggerDefinitionResponse     `json:"trigger_definitions"`
 	CSRFToken              string                          `json:"csrf_token"`
+}
+
+// triggerDefinitionResponse is what a trigger is configured to do, beside the
+// durable state the snapshot reports for it.
+type triggerDefinitionResponse struct {
+	Identity     string   `json:"identity"`
+	Family       string   `json:"family"`
+	Command      string   `json:"command"`
+	Label        string   `json:"label,omitempty"`
+	On           string   `json:"on,omitempty"`
+	Repositories []string `json:"repositories"`
+	Every        string   `json:"every,omitempty"`
+	Schedule     string   `json:"schedule,omitempty"`
 }
 
 type registerRepositoryRequest struct {
@@ -420,6 +434,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/jobs", s.authorizeSubmission(s.submit))
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", s.authorizeSubmission(s.deleteJob))
 	mux.HandleFunc("POST /api/v1/repositories", s.authorizeSubmission(s.registerRepository))
+	mux.HandleFunc("POST /api/v1/triggers", s.authorizeSubmission(s.registerTrigger))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
@@ -475,6 +490,7 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		Commands:               definition.CommandNames(),
 		Repositories:           repositories,
 		RegisteredRepositories: s.registeredRepositories(),
+		TriggerDefinitions:     s.triggerDefinitions(),
 		CSRFToken:              s.csrfToken,
 	})
 }
@@ -490,6 +506,57 @@ func (s *Server) knownRepositories(ctx context.Context) ([]string, error) {
 	known := append(advertised, slices.Collect(maps.Keys(s.currentSlugs()))...)
 	slices.Sort(known)
 	return slices.Compact(known), nil
+}
+
+func (s *Server) triggerDefinitions() []triggerDefinitionResponse {
+	triggers := s.currentTriggers()
+	definitions := make([]triggerDefinitionResponse, 0, len(triggers))
+	for _, trigger := range triggers {
+		definition := triggerDefinitionResponse{
+			Identity: trigger.Identity, Family: trigger.Family, Command: trigger.SelectionName,
+			Label: trigger.Label, On: trigger.Subject, Schedule: trigger.Schedule,
+			Repositories: slices.Sorted(maps.Keys(trigger.GitHubRepositories)),
+		}
+		if trigger.Repository != "" && trigger.Family != "github" {
+			definition.Repositories = []string{trigger.Repository}
+		}
+		if trigger.Every > 0 {
+			definition.Every = trigger.Every.String()
+		}
+		definitions = append(definitions, definition)
+	}
+	return definitions
+}
+
+func (s *Server) registerTrigger(response http.ResponseWriter, request *http.Request) {
+	if !limitRequestBody(response, request, maxRequestBytes) {
+		return
+	}
+	var input config.GitHubTriggerRegistration
+	if err := decodeJSON(request, &input); err != nil {
+		writeDecodeError(response, err)
+		return
+	}
+	s.registrationMu.Lock()
+	defer s.registrationMu.Unlock()
+	registered, err := config.RegisterGitHubTrigger(s.definitionPath, input)
+	switch {
+	case errors.Is(err, config.ErrTriggerExists):
+		writeError(response, http.StatusConflict, err)
+		return
+	case errors.Is(err, config.ErrInvalidTrigger):
+		writeError(response, http.StatusBadRequest, err)
+		return
+	case err != nil:
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.reloadPolicy(request.Context()); err != nil {
+		log.Printf("apply trigger %q: %v", registered.Name, err)
+		writeError(response, http.StatusInternalServerError, fmt.Errorf("registered github/%s in config.toml but could not apply it; restart the control plane: %w", registered.Name, err))
+		return
+	}
+	writeJSON(response, http.StatusCreated, registered)
 }
 
 func (s *Server) registerRepository(response http.ResponseWriter, request *http.Request) {

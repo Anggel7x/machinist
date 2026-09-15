@@ -177,7 +177,22 @@ type GitHubTrigger struct {
 	TriggerSelection
 	Every string `toml:"every"`
 	Label string `toml:"label"`
+	// On is what the label must be added to: "issue" (the default) or
+	// "pull_request".
+	On string `toml:"on"`
+	// Repository limits the trigger to one registered repository; empty
+	// watches every registered repository.
+	Repository string `toml:"repository"`
+	// Prompt, when set, precedes the labelled issue or pull request URL in the
+	// admitted job's prompt instead of "Complete <url>".
+	Prompt string `toml:"prompt"`
 }
+
+// Values of a GitHub trigger's on.
+const (
+	GitHubIssueSubject       = "issue"
+	GitHubPullRequestSubject = "pull_request"
+)
 
 type IntervalTrigger struct {
 	TriggerSelection
@@ -205,12 +220,14 @@ type ResolvedTrigger struct {
 	Schedule           string
 	Timezone           string
 	Label              string
-	SelectionName      string
-	Model              string
-	Prompt             string
-	Command            ResolvedCommand
-	Signature          string
-	cron               *triggers.Cron
+	// Subject is what a GitHub trigger's label is added to.
+	Subject       string
+	SelectionName string
+	Model         string
+	Prompt        string
+	Command       ResolvedCommand
+	Signature     string
+	cron          *triggers.Cron
 }
 
 type Command struct {

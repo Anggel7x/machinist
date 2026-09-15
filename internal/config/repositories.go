@@ -29,52 +29,68 @@ type RepositoryRegistration struct {
 }
 
 // RegisterRepository appends one [repositories.NAME] block to the Machinist
-// config at path. The name defaults to the repository half of the slug. The
-// new file is proved to load, triggers included, before it replaces the old
-// one, so a rejected registration leaves the configuration untouched.
+// config at path. The name defaults to the repository half of the slug.
 func RegisterRepository(path, slug, name string, parallel int) (RepositoryRegistration, error) {
-	registration.Lock()
-	defer registration.Unlock()
-
 	repository, err := repositoryDeclaration(slug, name, parallel)
 	if err != nil {
 		return RepositoryRegistration{}, err
 	}
-	target, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return RepositoryRegistration{}, fmt.Errorf("resolve Machinist config %q: %w", path, err)
-	}
-	slugs, err := loadRepositoryPolicy(target)
+	err = appendConfigBlock(path, ErrInvalidRepository, func(current Config, slugs map[string]string) (string, error) {
+		for existingName, existingSlug := range slugs {
+			if existingName == repository.Name {
+				return "", fmt.Errorf("%w: %q is already registered as %q", ErrRepositoryExists, existingName, existingSlug)
+			}
+			if strings.EqualFold(existingSlug, repository.Slug) {
+				return "", fmt.Errorf("%w: %q is already registered as %q", ErrRepositoryExists, existingSlug, existingName)
+			}
+		}
+		return repository.block(), nil
+	})
 	if err != nil {
 		return RepositoryRegistration{}, err
 	}
-	for existingName, existingSlug := range slugs {
-		if existingName == repository.Name {
-			return RepositoryRegistration{}, fmt.Errorf("%w: %q is already registered as %q", ErrRepositoryExists, existingName, existingSlug)
-		}
-		if strings.EqualFold(existingSlug, repository.Slug) {
-			return RepositoryRegistration{}, fmt.Errorf("%w: %q is already registered as %q", ErrRepositoryExists, existingSlug, existingName)
-		}
+	return repository, nil
+}
+
+// appendConfigBlock appends the block that build derives from the current
+// configuration. The new file is proved to load, triggers included, before it
+// replaces the old one, so a rejected change leaves the configuration
+// untouched; a candidate that fails to load is reported as invalid.
+func appendConfigBlock(path string, invalid error, build func(Config, map[string]string) (string, error)) error {
+	registration.Lock()
+	defer registration.Unlock()
+
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("resolve Machinist config %q: %w", path, err)
+	}
+	current, slugs, err := loadRepositoryPolicy(target)
+	if err != nil {
+		return err
+	}
+	block, err := build(current, slugs)
+	if err != nil {
+		return err
 	}
 
 	info, err := os.Stat(target)
 	if err != nil {
-		return RepositoryRegistration{}, fmt.Errorf("inspect Machinist config %q: %w", target, err)
+		return fmt.Errorf("inspect Machinist config %q: %w", target, err)
 	}
 	body, err := readBoundedFile(target, maxConfigBytes)
 	if err != nil {
-		return RepositoryRegistration{}, fmt.Errorf("read Machinist config %q: %w", target, err)
+		return fmt.Errorf("read Machinist config %q: %w", target, err)
 	}
 	if len(body) > 0 && body[len(body)-1] != '\n' {
 		body = append(body, '\n')
 	}
-	body = append(body, repository.block()...)
+	body = append(body, block...)
 
 	// The candidate sits beside the original so relative paths resolve the
 	// same way and the final rename stays on one filesystem.
 	candidate, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".*")
 	if err != nil {
-		return RepositoryRegistration{}, fmt.Errorf("stage Machinist config: %w", err)
+		return fmt.Errorf("stage Machinist config: %w", err)
 	}
 	candidatePath := candidate.Name()
 	committed := false
@@ -83,50 +99,41 @@ func RegisterRepository(path, slug, name string, parallel int) (RepositoryRegist
 			_ = os.Remove(candidatePath)
 		}
 	}()
-	if _, err := candidate.Write(body); err != nil {
-		candidate.Close()
-		return RepositoryRegistration{}, fmt.Errorf("stage Machinist config: %w", err)
+	_, writeErr := candidate.Write(body)
+	chmodErr := candidate.Chmod(info.Mode().Perm())
+	syncErr := candidate.Sync()
+	closeErr := candidate.Close()
+	if err := errors.Join(writeErr, chmodErr, syncErr, closeErr); err != nil {
+		return fmt.Errorf("stage Machinist config: %w", err)
 	}
-	if err := candidate.Chmod(info.Mode().Perm()); err != nil {
-		candidate.Close()
-		return RepositoryRegistration{}, fmt.Errorf("stage Machinist config: %w", err)
-	}
-	if err := candidate.Sync(); err != nil {
-		candidate.Close()
-		return RepositoryRegistration{}, fmt.Errorf("stage Machinist config: %w", err)
-	}
-	if err := candidate.Close(); err != nil {
-		return RepositoryRegistration{}, fmt.Errorf("stage Machinist config: %w", err)
-	}
-	if _, err := loadRepositoryPolicy(candidatePath); err != nil {
-		return RepositoryRegistration{}, fmt.Errorf("%w: %v", ErrInvalidRepository, err)
+	if _, _, err := loadRepositoryPolicy(candidatePath); err != nil {
+		return fmt.Errorf("%w: %v", invalid, err)
 	}
 	if err := os.Rename(candidatePath, target); err != nil {
-		return RepositoryRegistration{}, fmt.Errorf("replace Machinist config %q: %w", target, err)
+		return fmt.Errorf("replace Machinist config %q: %w", target, err)
 	}
 	committed = true
-	return repository, nil
+	return nil
 }
 
 // loadRepositoryPolicy loads everything a registration can change, the
-// triggers that watch every registered repository included, and returns the
-// registered slugs.
-func loadRepositoryPolicy(path string) (map[string]string, error) {
+// triggers that watch registered repositories included.
+func loadRepositoryPolicy(path string) (Config, map[string]string, error) {
 	definition, err := loadConfigFile(path)
 	if err != nil {
-		return nil, err
+		return Config{}, nil, err
 	}
 	slugs, err := definition.RepositorySlugs()
 	if err != nil {
-		return nil, err
+		return Config{}, nil, err
 	}
 	if _, err := definition.RepositoryCeilings(); err != nil {
-		return nil, err
+		return Config{}, nil, err
 	}
 	if _, err := definition.ResolveTriggers(); err != nil {
-		return nil, err
+		return Config{}, nil, err
 	}
-	return slugs, nil
+	return definition, slugs, nil
 }
 
 // repositoryDeclaration validates one registration before anything is written.
@@ -153,7 +160,7 @@ func repositoryDeclaration(slug, requested string, parallel int) (RepositoryRegi
 }
 
 func (r RepositoryRegistration) block() string {
-	block := fmt.Sprintf("\n[repositories.%s]\nslug = %q\n", r.Name, r.Slug)
+	block := fmt.Sprintf("\n[repositories.%s]\nslug = %q\n", tomlKey(r.Name), r.Slug)
 	if r.Parallel > 0 {
 		block += fmt.Sprintf("parallel = %d\n", r.Parallel)
 	}
@@ -175,4 +182,13 @@ func LogicalRepositoryName(repository string) string {
 		}
 	}, lowered)
 	return strings.Trim(mapped, "-")
+}
+
+// tomlKey writes a validated name as one TOML key: a bare key splits on '.',
+// so a name containing one is quoted.
+func tomlKey(name string) string {
+	if strings.Contains(name, ".") {
+		return `"` + name + `"`
+	}
+	return name
 }
