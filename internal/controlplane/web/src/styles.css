@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/* The built bundle is committed because it is embedded in the Go binary, and
+   Tailwind scans the whole project for class names — so without this the
+   previous bundle feeds its own classes back into the next build, and a
+   rebuild from unchanged source produces a different bundle. */
+@source not "../dist";
+
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
