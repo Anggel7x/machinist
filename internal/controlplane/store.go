@@ -708,14 +708,46 @@ func (s *Store) AddTriggerCoalesced(ctx context.Context, identity, configGenerat
 	return nil
 }
 
-func (s *Store) Poll(ctx context.Context, request protocol.PollRequest) (*protocol.RunSpec, error) {
-	return s.poll(ctx, request, 0)
+// dispatchLimits is everything that can stop a queued run being leased.
+// MaxConcurrentJobs caps the whole fleet; RepositoryCeilings caps one
+// repository. Both are control-plane policy: a worker cannot route around
+// either, however many of them a host runs.
+type dispatchLimits struct {
+	MaxConcurrentJobs  int
+	RepositoryCeilings map[string]int
 }
 
-// poll allows at most maxConcurrentJobs running jobs. Zero leaves concurrency
-// unlimited. Expired leases remain eligible so interrupted work can make progress.
-func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcurrentJobs int) (*protocol.RunSpec, error) {
-	if maxConcurrentJobs < 0 {
+func countRunningJobsByRepository(ctx context.Context, tx *sql.Tx) (map[string]int, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT repository,COUNT(*) FROM jobs WHERE state='running' GROUP BY repository`)
+	if err != nil {
+		return nil, fmt.Errorf("count running jobs by repository: %w", err)
+	}
+	defer rows.Close()
+	running := map[string]int{}
+	for rows.Next() {
+		var repository string
+		var count int
+		if err := rows.Scan(&repository, &count); err != nil {
+			return nil, err
+		}
+		running[repository] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return running, nil
+}
+
+func (s *Store) Poll(ctx context.Context, request protocol.PollRequest) (*protocol.RunSpec, error) {
+	return s.poll(ctx, request, dispatchLimits{})
+}
+
+// poll allows at most MaxConcurrentJobs running jobs, and at most a
+// repository's declared ceiling of running jobs for that repository. Zero
+// leaves either unlimited. Expired leases remain eligible so interrupted work
+// can make progress.
+func (s *Store) poll(ctx context.Context, request protocol.PollRequest, limits dispatchLimits) (*protocol.RunSpec, error) {
+	if limits.MaxConcurrentJobs < 0 {
 		return nil, errors.New("max concurrent jobs cannot be negative")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -754,12 +786,24 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 		return nil, err
 	}
 	atCapacity := false
-	if maxConcurrentJobs > 0 {
+	if limits.MaxConcurrentJobs > 0 {
 		var runningJobs int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE state='running'`).Scan(&runningJobs); err != nil {
 			return nil, fmt.Errorf("count running jobs: %w", err)
 		}
-		atCapacity = runningJobs >= maxConcurrentJobs
+		atCapacity = runningJobs >= limits.MaxConcurrentJobs
+	}
+	repositoriesAtCeiling := make(map[string]bool, len(limits.RepositoryCeilings))
+	if len(limits.RepositoryCeilings) > 0 {
+		running, err := countRunningJobsByRepository(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+		for repository, ceiling := range limits.RepositoryCeilings {
+			if ceiling > 0 && running[repository] >= ceiling {
+				repositoriesAtCeiling[repository] = true
+			}
+		}
 	}
 
 	executors := stringSet(request.Executors)
@@ -775,7 +819,7 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 			rows.Close()
 			return nil, err
 		}
-		if atCapacity && jobState != "running" {
+		if jobState != "running" && (atCapacity || repositoriesAtCeiling[candidate.Repository]) {
 			continue
 		}
 		if executors[candidate.Executor] && repositories[candidate.Repository] && supportsModel(request.Models, candidate.Executor, candidate.Model) {

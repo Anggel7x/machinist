@@ -35,10 +35,22 @@ const (
 type Worker struct {
 	Name          string                `toml:"name"`
 	DataDirectory string                `toml:"data_directory"`
+	MaxWorkers    *int                  `toml:"max_workers"`
 	ControlPlane  ControlPlane          `toml:"control_plane"`
 	Executors     map[string]Executor   `toml:"executors"`
 	Repositories  map[string]Repository `toml:"repositories"`
 	configDir     string
+}
+
+// PoolSize is how many workers this host is willing to run at once. It is a
+// capability of the machine, not a policy about any repository: per-repository
+// ceilings live in the control plane's config and are enforced when a run is
+// leased.
+func (w Worker) PoolSize() int {
+	if w.MaxWorkers == nil {
+		return 1
+	}
+	return *w.MaxWorkers
 }
 
 type ControlPlane struct {
@@ -68,15 +80,68 @@ type Server struct {
 }
 
 type Config struct {
-	Server   Server             `toml:"server"`
-	Commands map[string]Command `toml:"commands"`
-	GitHub   GitHub             `toml:"github"`
-	Triggers TriggerDefinitions `toml:"triggers"`
-	path     string
+	Server       Server                      `toml:"server"`
+	Commands     map[string]Command          `toml:"commands"`
+	Repositories map[string]RepositoryPolicy `toml:"repositories"`
+	GitHub       GitHub                      `toml:"github"`
+	Triggers     TriggerDefinitions          `toml:"triggers"`
+	path         string
+}
+
+// RepositoryPolicy is everything the control plane decides about one
+// repository: where it lives on GitHub, and how much work it may carry at
+// once. Both are policy about a codebase, so neither belongs in worker.toml.
+type RepositoryPolicy struct {
+	Slug     string `toml:"slug"`
+	Parallel *int   `toml:"parallel"`
 }
 
 type GitHub struct {
 	Repositories map[string]string `toml:"repositories"`
+}
+
+// RepositorySlugs resolves every registered repository to its OWNER/REPO slug.
+// [repositories] is the current surface; the older [github.repositories] map is
+// still read so existing configurations keep working, and a name may not appear
+// in both with different slugs.
+func (c Config) RepositorySlugs() (map[string]string, error) {
+	combined := make(map[string]string, len(c.Repositories)+len(c.GitHub.Repositories))
+	for _, name := range sortedMapKeys(c.Repositories) {
+		slug := strings.TrimSpace(c.Repositories[name].Slug)
+		if slug == "" {
+			return nil, fmt.Errorf("repository %q must define a slug", name)
+		}
+		combined[name] = slug
+	}
+	for _, name := range sortedMapKeys(c.GitHub.Repositories) {
+		slug := c.GitHub.Repositories[name]
+		if existing, ok := combined[name]; ok {
+			if existing != slug {
+				return nil, fmt.Errorf("repository %q is declared as %q under [repositories] and %q under [github.repositories]", name, existing, slug)
+			}
+			continue
+		}
+		combined[name] = slug
+	}
+	return resolveGitHubRepositories(combined)
+}
+
+// RepositoryCeilings resolves the declared per-repository parallelism. A
+// repository with no ceiling is absent from the result and therefore unlimited
+// beyond the fleet-wide max_concurrent_jobs.
+func (c Config) RepositoryCeilings() (map[string]int, error) {
+	ceilings := make(map[string]int, len(c.Repositories))
+	for _, name := range sortedMapKeys(c.Repositories) {
+		policy := c.Repositories[name]
+		if policy.Parallel == nil {
+			continue
+		}
+		if *policy.Parallel <= 0 {
+			return nil, fmt.Errorf("repository %q parallel must be positive", name)
+		}
+		ceilings[name] = *policy.Parallel
+	}
+	return ceilings, nil
 }
 
 type TriggerDefinitions struct {
@@ -195,6 +260,12 @@ func LoadConfig(path string) (Config, error) {
 	machinistConfig.Server.configDir = filepath.Dir(machinistConfig.path)
 	machinistConfig.Server, err = applyServerDefaults(machinistConfig.Server)
 	if err != nil {
+		return Config{}, err
+	}
+	if _, err := machinistConfig.RepositorySlugs(); err != nil {
+		return Config{}, err
+	}
+	if _, err := machinistConfig.RepositoryCeilings(); err != nil {
 		return Config{}, err
 	}
 	return machinistConfig, nil
@@ -459,6 +530,9 @@ func applyWorkerDefaults(worker Worker) (Worker, error) {
 }
 
 func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, error)) (Worker, error) {
+	if worker.MaxWorkers != nil && *worker.MaxWorkers <= 0 {
+		return Worker{}, errors.New("max_workers must be positive")
+	}
 	worker.Name = strings.TrimSpace(worker.Name)
 	if worker.Name == "" {
 		hostname, err := getHostname()

@@ -157,11 +157,11 @@ func TestStoreConcurrentJobLimitLeavesAdditionalJobsQueued(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, err := store.poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}), 1)
+	first, err := store.poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}), dispatchLimits{MaxConcurrentJobs: 1})
 	if err != nil || first == nil || first.JobID != firstJob {
 		t.Fatalf("first lease = %#v, %v", first, err)
 	}
-	blocked, err := store.poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}), 1)
+	blocked, err := store.poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}), dispatchLimits{MaxConcurrentJobs: 1})
 	if err != nil || blocked != nil {
 		t.Fatalf("poll at capacity = %#v, %v", blocked, err)
 	}
@@ -180,7 +180,7 @@ func TestStoreConcurrentJobLimitLeavesAdditionalJobsQueued(t *testing.T) {
 	if err := store.Complete(t.Context(), first.ID, protocol.Completion{InstanceID: "worker-a", LeaseToken: first.LeaseToken, State: "succeeded", ExitCode: 0}); err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}), 1)
+	second, err := store.poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}), dispatchLimits{MaxConcurrentJobs: 1})
 	if err != nil || second == nil || second.JobID != secondJob {
 		t.Fatalf("second lease = %#v, %v", second, err)
 	}
@@ -197,13 +197,13 @@ func TestStoreConcurrentJobLimitRedispatchesExpiredActiveJob(t *testing.T) {
 	if _, err := store.CreateJob(t.Context(), "queued", "machinist", "review", testAgent("review", "Queued request")); err != nil {
 		t.Fatal(err)
 	}
-	initial, err := store.poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}), 1)
+	initial, err := store.poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}), dispatchLimits{MaxConcurrentJobs: 1})
 	if err != nil || initial == nil || initial.JobID != activeJob {
 		t.Fatalf("initial lease = %#v, %v", initial, err)
 	}
 
 	clock.Advance(leaseDuration)
-	redispatched, err := store.poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}), 1)
+	redispatched, err := store.poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}), dispatchLimits{MaxConcurrentJobs: 1})
 	if err != nil || redispatched == nil || redispatched.ID != initial.ID || redispatched.LeaseToken == initial.LeaseToken {
 		t.Fatalf("redispatched lease = %#v, %v", redispatched, err)
 	}
@@ -226,7 +226,7 @@ func TestConcurrentPollsRespectGlobalJobLimit(t *testing.T) {
 		go func(instance string) {
 			defer group.Done()
 			<-start
-			run, err := store.poll(context.Background(), pollRequest(instance, []string{"codex"}, []string{"machinist"}), 1)
+			run, err := store.poll(context.Background(), pollRequest(instance, []string{"codex"}, []string{"machinist"}), dispatchLimits{MaxConcurrentJobs: 1})
 			results <- run
 			errorsChannel <- err
 		}(instance)
@@ -1183,4 +1183,39 @@ PRAGMA user_version=1;` + extra); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestPollEnforcesPerRepositoryCeilingWithoutBlockingOtherRepositories(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	firstTac, err := store.CreateJob(t.Context(), "first", "tac-restaurant", "plan", testAgent("plan", "First request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTac, err := store.CreateJob(t.Context(), "second", "tac-restaurant", "plan", testAgent("plan", "Second request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	elsewhere, err := store.CreateJob(t.Context(), "third", "machinist", "plan", testAgent("plan", "Third request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := dispatchLimits{RepositoryCeilings: map[string]int{"tac-restaurant": 1}}
+	both := []string{"machinist", "tac-restaurant"}
+
+	leased, err := store.poll(t.Context(), pollRequest("worker-a", []string{"codex"}, both), limits)
+	if err != nil || leased == nil || leased.JobID != firstTac {
+		t.Fatalf("first lease = %#v, %v", leased, err)
+	}
+
+	// The repository is at its ceiling, so a fungible worker must skip its
+	// queued run and take eligible work from another repository instead.
+	leased, err = store.poll(t.Context(), pollRequest("worker-b", []string{"codex"}, both), limits)
+	if err != nil || leased == nil || leased.JobID != elsewhere {
+		t.Fatalf("second lease = %#v, %v", leased, err)
+	}
+
+	leased, err = store.poll(t.Context(), pollRequest("worker-c", []string{"codex"}, both), limits)
+	if err != nil || leased != nil {
+		t.Fatalf("third lease = %#v, %v, want nothing while %s waits on the ceiling", leased, err, secondTac)
+	}
 }

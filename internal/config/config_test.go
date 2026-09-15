@@ -672,3 +672,93 @@ func TestLoadConfigRejectsRemovedShepherdSchedules(t *testing.T) {
 		t.Fatalf("error = %v, want removed shepherd schedule guidance", err)
 	}
 }
+
+func TestRepositoryPolicyCarriesSlugAndCeilingAndFallsBackToGitHubMap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeTestFile(t, path, "[server]\nworker_token_file = \"token\"\n\n[repositories.tac-restaurant]\nslug = \"anggel7x/tac_restaurant\"\nparallel = 3\n\n[github.repositories]\nmachinist = \"owainlewis/machinist\"\n")
+
+	definition, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slugs, err := definition.RepositorySlugs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slugs["tac-restaurant"] != "anggel7x/tac_restaurant" || slugs["machinist"] != "owainlewis/machinist" {
+		t.Fatalf("slugs = %v", slugs)
+	}
+	ceilings, err := definition.RepositoryCeilings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ceilings["tac-restaurant"] != 3 {
+		t.Fatalf("ceiling = %d, want 3", ceilings["tac-restaurant"])
+	}
+	if _, declared := ceilings["machinist"]; declared {
+		t.Fatalf("ceilings = %v, want no entry for an undeclared repository", ceilings)
+	}
+}
+
+func TestLoadConfigRejectsInvalidRepositoryPolicy(t *testing.T) {
+	for name, body := range map[string]string{
+		"non-positive ceiling": "[server]\nworker_token_file = \"token\"\n\n[repositories.tac]\nslug = \"o/r\"\nparallel = 0\n",
+		"missing slug":         "[server]\nworker_token_file = \"token\"\n\n[repositories.tac]\nparallel = 2\n",
+		"conflicting slug":     "[server]\nworker_token_file = \"token\"\n\n[repositories.tac]\nslug = \"o/one\"\n\n[github.repositories]\ntac = \"o/two\"\n",
+		"unsafe slug":          "[server]\nworker_token_file = \"token\"\n\n[repositories.tac]\nslug = \"../escape\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeTestFile(t, path, body)
+			if _, err := LoadConfig(path); err == nil {
+				t.Fatal("expected load to reject the repository policy")
+			}
+		})
+	}
+}
+
+func TestLoadConfigKeepsRepositoryWithoutCeiling(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeTestFile(t, path, "[server]\nworker_token_file = \"token\"\n\n[repositories.tac]\nslug = \"o/r\"\n")
+
+	definition, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ceilings, err := definition.RepositoryCeilings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ceilings) != 0 {
+		t.Fatalf("ceilings = %v, want empty", ceilings)
+	}
+}
+
+func TestWorkerPoolSizeDefaultsToOneAndMustBePositive(t *testing.T) {
+	directory := t.TempDir()
+	plain := filepath.Join(directory, "worker.toml")
+	writeTestFile(t, plain, "data_directory = \"state\"\n")
+	worker, err := LoadWorker(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.PoolSize() != 1 {
+		t.Fatalf("pool size = %d, want 1", worker.PoolSize())
+	}
+
+	pooled := filepath.Join(directory, "pooled.toml")
+	writeTestFile(t, pooled, "data_directory = \"state\"\nmax_workers = 3\n")
+	worker, err = LoadWorker(pooled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.PoolSize() != 3 {
+		t.Fatalf("pool size = %d, want 3", worker.PoolSize())
+	}
+
+	invalid := filepath.Join(directory, "invalid.toml")
+	writeTestFile(t, invalid, "data_directory = \"state\"\nmax_workers = 0\n")
+	if _, err := LoadWorker(invalid); err == nil {
+		t.Fatal("expected load to reject a non-positive host cap")
+	}
+}

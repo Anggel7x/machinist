@@ -44,6 +44,7 @@ type Server struct {
 	schedulerError    func(error)
 	shutdownTimeout   time.Duration
 	maxConcurrentJobs int
+	repositoryCeiling map[string]int
 	workerToken       string
 	csrfToken         string
 	handler           http.Handler
@@ -92,6 +93,14 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	if err != nil {
 		return nil, err
 	}
+	definition, err := config.LoadDefinitions(definitionPath)
+	if err != nil {
+		return nil, err
+	}
+	ceilings, err := definition.RepositoryCeilings()
+	if err != nil {
+		return nil, err
+	}
 	startup := time.Now().UTC()
 	definitions := make([]TriggerDefinition, 0, len(managedTriggers))
 	for _, trigger := range managedTriggers {
@@ -108,7 +117,8 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		github: NewGitHubCLI("gh", 30*time.Second), now: time.Now,
 		schedulerEvery: 30 * time.Second, shutdownTimeout: 5 * time.Second,
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
-		maxConcurrentJobs: maxConcurrentJobs, workerToken: workerToken, csrfToken: csrfToken,
+		maxConcurrentJobs: maxConcurrentJobs, repositoryCeiling: ceilings,
+		workerToken: workerToken, csrfToken: csrfToken,
 	}
 	server.handler, err = server.routes()
 	if err != nil {
@@ -118,6 +128,12 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 }
 
 func (s *Server) Handler() http.Handler { return s.handler }
+
+// dispatchLimits is the policy a poll is judged against: the fleet-wide job
+// limit plus each repository's declared ceiling.
+func (s *Server) dispatchLimits() dispatchLimits {
+	return dispatchLimits{MaxConcurrentJobs: s.maxConcurrentJobs, RepositoryCeilings: s.repositoryCeiling}
+}
 
 func (s *Server) Serve(ctx context.Context, listen string, onListening func(net.Addr)) error {
 	if err := validateLoopbackListen(listen); err != nil {
@@ -411,7 +427,7 @@ func (s *Server) poll(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, errors.New("worker instance_id and name are required"))
 		return
 	}
-	run, err := s.store.poll(request.Context(), input, s.maxConcurrentJobs)
+	run, err := s.store.poll(request.Context(), input, s.dispatchLimits())
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return

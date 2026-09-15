@@ -81,7 +81,7 @@ func validateTriggerKeys(raw map[string]any) error {
 // ResolveTriggers validates repositories, schedules, selections, models, and
 // prompts before any trigger loop is started.
 func (c Config) ResolveTriggers() ([]ResolvedTrigger, error) {
-	repositories, err := resolveGitHubRepositories(c.GitHub.Repositories)
+	repositories, err := c.RepositorySlugs()
 	if err != nil {
 		return nil, err
 	}
