@@ -459,7 +459,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
 	mux.Handle("/", http.FileServer(http.FS(dist)))
-	return securityHeaders(mux), nil
+	return securityHeaders(loopbackHost(mux)), nil
 }
 
 func (s *Server) definitions(response http.ResponseWriter, request *http.Request) {
@@ -955,8 +955,34 @@ func (s *Server) validBrowserRequest(request *http.Request) bool {
 	if err != nil || origin.Scheme != "http" || !strings.EqualFold(origin.Host, request.Host) {
 		return false
 	}
-	hostname := origin.Hostname()
-	return hostname == "localhost" || net.ParseIP(hostname) != nil && net.ParseIP(hostname).IsLoopback()
+	return isLoopbackHostname(origin.Hostname())
+}
+
+// loopbackHost refuses a request addressed to any name but localhost or a
+// loopback IP. Binding to loopback keeps other machines out, but not a web
+// page that rebinds its own domain to 127.0.0.1: the browser then treats the
+// control plane as that page's origin and lets it read status, transcripts
+// and diffs. The rebound request still carries the page's domain as its Host.
+func loopbackHost(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		hostname := request.Host
+		if host, _, err := net.SplitHostPort(request.Host); err == nil {
+			hostname = host
+		}
+		if !isLoopbackHostname(strings.Trim(hostname, "[]")) {
+			writeError(response, http.StatusMisdirectedRequest, errors.New("request host must be localhost or a loopback address"))
+			return
+		}
+		next.ServeHTTP(response, request)
+	})
+}
+
+func isLoopbackHostname(hostname string) bool {
+	if strings.EqualFold(hostname, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(hostname)
+	return ip != nil && ip.IsLoopback()
 }
 
 func validateLoopbackListen(listen string) error {
