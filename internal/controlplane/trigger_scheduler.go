@@ -14,11 +14,57 @@ import (
 
 const queuedGitHubLabel = "machinist:queued"
 
+// mirrorPageSize bounds one repository's mirror read. It is the active window:
+// anything older keeps whatever was last mirrored for it.
+const mirrorPageSize = 100
+
 type githubTriggerClient interface {
 	SearchRequestedIssues(context.Context, []string, string, int) ([]GitHubCandidate, error)
 	IssueDetails(context.Context, string, int, string) (GitHubIssueDetails, error)
 	Permission(context.Context, string, string) (string, error)
 	AcknowledgeRequest(context.Context, string, int, string, string, bool) error
+	ListPullRequests(context.Context, string, int) ([]PullRequestMirror, error)
+	ListIssues(context.Context, string, int) ([]IssueMirror, error)
+}
+
+// mirrorGitHubOutcomes refreshes every registered repository's pull requests
+// and issues. One list call per repository resolves every tracked issue at
+// once, because closingIssuesReferences arrives with the pull request, so the
+// cost is per repository rather than per job.
+//
+// This pass only reads. Adjudicating and merging belongs to the repository's
+// own policy workflow, and nothing here writes to GitHub.
+func (s *Server) mirrorGitHubOutcomes(ctx context.Context) error {
+	if len(s.repositorySlugs) == 0 {
+		return nil
+	}
+	fetchedAt := s.now().UTC()
+	var failures []error
+	for _, repository := range slices.Sorted(maps.Keys(s.repositorySlugs)) {
+		slug := s.repositorySlugs[repository]
+		pulls, err := s.github.ListPullRequests(ctx, slug, mirrorPageSize)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("mirror %s pull requests: %w", slug, err))
+			continue
+		}
+		issues, err := s.github.ListIssues(ctx, slug, mirrorPageSize)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("mirror %s issues: %w", slug, err))
+			continue
+		}
+		// Rows are keyed by the logical repository name so a job joins to them
+		// directly; the GitHub slug survives in each row's URL.
+		for index := range pulls {
+			pulls[index].Repository = repository
+		}
+		for index := range issues {
+			issues[index].Repository = repository
+		}
+		if err := s.store.ReplaceRepositoryMirror(ctx, repository, pulls, issues, fetchedAt); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func (s *Server) processManagedTrigger(ctx context.Context, trigger config.ResolvedTrigger) error {

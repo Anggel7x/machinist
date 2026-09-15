@@ -634,3 +634,203 @@ func decodeSingleJSON(output []byte, target any) error {
 	}
 	return nil
 }
+
+// pullRequestFields is one call's worth of everything the mirror caches.
+// closingIssuesReferences comes back with the pull request, so one list per
+// repository resolves issues to pull requests without a call per job.
+const pullRequestFields = "number,url,title,state,isDraft,mergeable,mergeStateStatus,reviewDecision,mergedAt," +
+	"headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,commits,closingIssuesReferences," +
+	"statusCheckRollup,updatedAt"
+
+const issueFields = "number,url,state,labels,updatedAt"
+
+type githubPullRequestPayload struct {
+	Number           int    `json:"number"`
+	URL              string `json:"url"`
+	Title            string `json:"title"`
+	State            string `json:"state"`
+	IsDraft          bool   `json:"isDraft"`
+	Mergeable        string `json:"mergeable"`
+	MergeStateStatus string `json:"mergeStateStatus"`
+	ReviewDecision   string `json:"reviewDecision"`
+	MergedAt         string `json:"mergedAt"`
+	HeadRefName      string `json:"headRefName"`
+	HeadRefOID       string `json:"headRefOid"`
+	BaseRefName      string `json:"baseRefName"`
+	Additions        int    `json:"additions"`
+	Deletions        int    `json:"deletions"`
+	ChangedFiles     int    `json:"changedFiles"`
+	UpdatedAt        string `json:"updatedAt"`
+	Commits          []struct {
+		OID string `json:"oid"`
+	} `json:"commits"`
+	ClosingIssuesReferences []struct {
+		Number int `json:"number"`
+	} `json:"closingIssuesReferences"`
+	StatusCheckRollup []struct {
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+		State      string `json:"state"`
+	} `json:"statusCheckRollup"`
+}
+
+type githubIssuePayload struct {
+	Number    int    `json:"number"`
+	URL       string `json:"url"`
+	State     string `json:"state"`
+	UpdatedAt string `json:"updatedAt"`
+	Labels    []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
+// ListPullRequests mirrors one repository's pull requests. It reads only: the
+// control plane never comments, reviews or merges, so nothing here can change
+// what a repository's own policy workflow decides.
+func (g *GitHubCLI) ListPullRequests(ctx context.Context, repository string, limit int) ([]PullRequestMirror, error) {
+	repository, err := normalizeGitHubRepository(repository)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > maxGitHubCandidates {
+		limit = maxGitHubCandidates
+	}
+	args := []string{"pr", "list", "--repo", repository, "--state", "all", "--limit", strconv.Itoa(limit), "--json", pullRequestFields}
+	stdout, err := g.run(ctx, "list pull requests", args)
+	if err != nil {
+		return nil, err
+	}
+	var payload []githubPullRequestPayload
+	if err := json.Unmarshal(stdout, &payload); err != nil {
+		return nil, malformedGitHubOutput("list pull requests", err, stdout)
+	}
+	mirrors := make([]PullRequestMirror, 0, len(payload))
+	for _, entry := range payload {
+		if entry.Number <= 0 {
+			continue
+		}
+		mirror := PullRequestMirror{
+			Repository:       repository,
+			Number:           entry.Number,
+			URL:              entry.URL,
+			Title:            entry.Title,
+			State:            strings.ToLower(strings.TrimSpace(entry.State)),
+			IsDraft:          entry.IsDraft,
+			Mergeable:        strings.EqualFold(entry.Mergeable, "MERGEABLE"),
+			MergeStateStatus: strings.ToUpper(strings.TrimSpace(entry.MergeStateStatus)),
+			ReviewDecision:   strings.ToUpper(strings.TrimSpace(entry.ReviewDecision)),
+			MergedAt:         parseGitHubTime(entry.MergedAt),
+			HeadRefName:      entry.HeadRefName,
+			HeadRefOID:       entry.HeadRefOID,
+			BaseRefName:      entry.BaseRefName,
+			Additions:        entry.Additions,
+			Deletions:        entry.Deletions,
+			ChangedFiles:     entry.ChangedFiles,
+			Commits:          len(entry.Commits),
+			UpdatedAt:        parseGitHubTime(entry.UpdatedAt),
+		}
+		for _, check := range entry.StatusCheckRollup {
+			switch {
+			case isPendingGitHubCheck(check.Status, check.State):
+				mirror.ChecksPending++
+			case isFailedGitHubCheck(check.Conclusion, check.State):
+				mirror.ChecksFailed++
+			default:
+				mirror.ChecksPassed++
+			}
+		}
+		mirror.ChecksState = rollUpGitHubChecks(mirror.ChecksPassed, mirror.ChecksFailed, mirror.ChecksPending)
+		if len(entry.ClosingIssuesReferences) > 0 {
+			mirror.IssueNumber = entry.ClosingIssuesReferences[0].Number
+		}
+		mirrors = append(mirrors, mirror)
+	}
+	return mirrors, nil
+}
+
+// ListIssues mirrors one repository's recent issues so the dashboard can show
+// live ticket state and labels. The limit bounds it to the active window;
+// issues outside that window keep whatever was last mirrored.
+func (g *GitHubCLI) ListIssues(ctx context.Context, repository string, limit int) ([]IssueMirror, error) {
+	repository, err := normalizeGitHubRepository(repository)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > maxGitHubCandidates {
+		limit = maxGitHubCandidates
+	}
+	args := []string{"issue", "list", "--repo", repository, "--state", "all", "--limit", strconv.Itoa(limit), "--json", issueFields}
+	stdout, err := g.run(ctx, "list issues", args)
+	if err != nil {
+		return nil, err
+	}
+	var payload []githubIssuePayload
+	if err := json.Unmarshal(stdout, &payload); err != nil {
+		return nil, malformedGitHubOutput("list issues", err, stdout)
+	}
+	mirrors := make([]IssueMirror, 0, len(payload))
+	for _, entry := range payload {
+		if entry.Number <= 0 {
+			continue
+		}
+		labels := make([]string, 0, len(entry.Labels))
+		for _, label := range entry.Labels {
+			if name := strings.TrimSpace(label.Name); name != "" {
+				labels = append(labels, name)
+			}
+		}
+		mirrors = append(mirrors, IssueMirror{
+			Repository: repository,
+			Number:     entry.Number,
+			URL:        entry.URL,
+			State:      strings.ToLower(strings.TrimSpace(entry.State)),
+			Labels:     labels,
+			UpdatedAt:  parseGitHubTime(entry.UpdatedAt),
+		})
+	}
+	return mirrors, nil
+}
+
+func isPendingGitHubCheck(status, state string) bool {
+	if status != "" && !strings.EqualFold(status, "COMPLETED") {
+		return true
+	}
+	return strings.EqualFold(state, "PENDING") || strings.EqualFold(state, "EXPECTED")
+}
+
+func isFailedGitHubCheck(conclusion, state string) bool {
+	switch strings.ToUpper(strings.TrimSpace(conclusion)) {
+	case "FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE":
+		return true
+	}
+	switch strings.ToUpper(strings.TrimSpace(state)) {
+	case "FAILURE", "ERROR":
+		return true
+	}
+	return false
+}
+
+func rollUpGitHubChecks(passed, failed, pending int) string {
+	switch {
+	case failed > 0:
+		return ChecksFailing
+	case pending > 0:
+		return ChecksPending
+	case passed > 0:
+		return ChecksPassing
+	default:
+		return ChecksNone
+	}
+}
+
+func parseGitHubTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "null" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed.UTC()
+}

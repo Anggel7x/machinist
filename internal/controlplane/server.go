@@ -45,6 +45,7 @@ type Server struct {
 	shutdownTimeout   time.Duration
 	maxConcurrentJobs int
 	repositoryCeiling map[string]int
+	repositorySlugs   map[string]string
 	workerToken       string
 	csrfToken         string
 	handler           http.Handler
@@ -101,6 +102,10 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	if err != nil {
 		return nil, err
 	}
+	slugs, err := definition.RepositorySlugs()
+	if err != nil {
+		return nil, err
+	}
 	startup := time.Now().UTC()
 	definitions := make([]TriggerDefinition, 0, len(managedTriggers))
 	for _, trigger := range managedTriggers {
@@ -117,7 +122,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		github: NewGitHubCLI("gh", 30*time.Second), now: time.Now,
 		schedulerEvery: 30 * time.Second, shutdownTimeout: 5 * time.Second,
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
-		maxConcurrentJobs: maxConcurrentJobs, repositoryCeiling: ceilings,
+		maxConcurrentJobs: maxConcurrentJobs, repositoryCeiling: ceilings, repositorySlugs: slugs,
 		workerToken: workerToken, csrfToken: csrfToken,
 	}
 	server.handler, err = server.routes()
@@ -231,6 +236,7 @@ func (s *Server) runScheduler(ctx context.Context) error {
 		})
 	}
 	loop(true, s.maintainState)
+	loop(false, s.mirrorGitHubOutcomes)
 	<-ctx.Done()
 	schedulers.Wait()
 	return nil

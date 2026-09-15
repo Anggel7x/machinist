@@ -372,3 +372,82 @@ func TestGitHubCLIRejectsUnsafeInputsBeforeExecution(t *testing.T) {
 		t.Fatalf("unsafe input reached executable: %v", runner.calls)
 	}
 }
+
+func TestGitHubCLIListPullRequestsRollsUpChecksAndLinksItsIssue(t *testing.T) {
+	cli, runner := newScriptedGitHubCLI(scriptedGitHubResult{stdout: `[
+  {"number":48,"url":"https://github.com/o/r/pull/48","title":"Ticket seam","state":"OPEN","isDraft":false,
+   "mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","reviewDecision":"APPROVED","mergedAt":null,
+   "headRefName":"machinist/39","headRefOid":"0f3ad45","baseRefName":"main",
+   "additions":140,"deletions":12,"changedFiles":6,"commits":[{"oid":"a"},{"oid":"b"}],
+   "closingIssuesReferences":[{"number":39}],"updatedAt":"2026-09-15T10:00:00Z",
+   "statusCheckRollup":[
+     {"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"},
+     {"__typename":"CheckRun","name":"slow","status":"IN_PROGRESS","conclusion":""},
+     {"__typename":"StatusContext","context":"legacy","state":"FAILURE"}]},
+  {"number":49,"url":"https://github.com/o/r/pull/49","title":"Landed","state":"MERGED","isDraft":false,
+   "mergeable":"UNKNOWN","mergeStateStatus":"CLEAN","reviewDecision":"","mergedAt":"2026-09-14T09:00:00Z",
+   "headRefName":"machinist/40","headRefOid":"beefbee","baseRefName":"main",
+   "additions":3,"deletions":1,"changedFiles":1,"commits":[{"oid":"c"}],
+   "closingIssuesReferences":[],"updatedAt":"2026-09-14T09:00:00Z","statusCheckRollup":[]}
+]`})
+
+	pulls, err := cli.ListPullRequests(context.Background(), "o/r", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := runner.calls[0]
+	for _, want := range []string{"pr", "list", "--repo", "o/r", "--state", "all", "closingIssuesReferences", "statusCheckRollup"} {
+		if !strings.Contains(strings.Join(call, " "), want) {
+			t.Fatalf("call %v is missing %q", call, want)
+		}
+	}
+	if len(pulls) != 2 {
+		t.Fatalf("pulls = %d, want 2", len(pulls))
+	}
+
+	blocked := pulls[0]
+	if blocked.Number != 48 || blocked.State != "open" || blocked.IssueNumber != 39 {
+		t.Fatalf("blocked = %#v", blocked)
+	}
+	if !blocked.Mergeable || blocked.MergeStateStatus != "BLOCKED" || blocked.ReviewDecision != "APPROVED" {
+		t.Fatalf("blocked merge state = %#v", blocked)
+	}
+	if blocked.ChecksState != ChecksFailing || blocked.ChecksPassed != 1 || blocked.ChecksFailed != 1 || blocked.ChecksPending != 1 {
+		t.Fatalf("checks = %q %d/%d/%d", blocked.ChecksState, blocked.ChecksPassed, blocked.ChecksFailed, blocked.ChecksPending)
+	}
+	if blocked.Commits != 2 || blocked.Additions != 140 || blocked.ChangedFiles != 6 {
+		t.Fatalf("change size = %#v", blocked)
+	}
+
+	landed := pulls[1]
+	if landed.State != "merged" || landed.MergedAt.IsZero() || landed.ChecksState != ChecksNone {
+		t.Fatalf("landed = %#v", landed)
+	}
+	if landed.Repository != "o/r" {
+		t.Fatalf("repository = %q", landed.Repository)
+	}
+}
+
+func TestGitHubCLIListIssuesMirrorsStateAndLabels(t *testing.T) {
+	cli, runner := newScriptedGitHubCLI(scriptedGitHubResult{stdout: `[
+  {"number":39,"url":"https://github.com/o/r/issues/39","state":"OPEN",
+   "labels":[{"name":"machinist:queued"},{"name":"serial"}],"updatedAt":"2026-09-15T11:00:00Z"}
+]`})
+
+	issues, err := cli.ListIssues(context.Background(), "o/r", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(runner.calls[0], " "), "issue list --repo o/r --state all") {
+		t.Fatalf("call = %v", runner.calls[0])
+	}
+	if len(issues) != 1 {
+		t.Fatalf("issues = %#v", issues)
+	}
+	if issues[0].Number != 39 || issues[0].State != "open" || issues[0].Repository != "o/r" {
+		t.Fatalf("issue = %#v", issues[0])
+	}
+	if !reflect.DeepEqual(issues[0].Labels, []string{"machinist:queued", "serial"}) {
+		t.Fatalf("labels = %v", issues[0].Labels)
+	}
+}

@@ -72,7 +72,7 @@ func TestOpenStoreReplacesLegacySchema(t *testing.T) {
 	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 || version != 2 {
+	if count != 0 || version != 3 {
 		t.Fatalf("migrated database count=%d version=%d", count, version)
 	}
 }
@@ -83,7 +83,7 @@ func TestOpenStoreRejectsNewerSchemaWithoutDeletingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('preserved'); PRAGMA user_version=3;`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('preserved'); PRAGMA user_version=4;`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -1140,8 +1140,8 @@ func testVersionOneUpgrade(t *testing.T, partial string) {
 	}
 	defer store.Close()
 	var version int
-	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 2 {
-		t.Fatalf("schema version = %d, %v, want 2", version, err)
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 3 {
+		t.Fatalf("schema version = %d, %v, want 3", version, err)
 	}
 	var columns int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name IN ('has_shepherd','schedule_name')`).Scan(&columns); err != nil || columns != 0 {
@@ -1217,5 +1217,70 @@ func TestPollEnforcesPerRepositoryCeilingWithoutBlockingOtherRepositories(t *tes
 	leased, err = store.poll(t.Context(), pollRequest("worker-c", []string{"codex"}, both), limits)
 	if err != nil || leased != nil {
 		t.Fatalf("third lease = %#v, %v, want nothing while %s waits on the ceiling", leased, err, secondTac)
+	}
+}
+
+func TestSnapshotReportsOutcomeFromMirroredGitHubState(t *testing.T) {
+	clock := newTestClock(time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC))
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	store.now = clock.Now
+	if err := store.SyncTriggers(t.Context(), []TriggerDefinition{{Identity: "github/intake", Family: "github", ConfigSignature: "v1"}}); err != nil {
+		t.Fatal(err)
+	}
+	admission := TriggerAdmission{
+		Identity: "github/intake", Family: "github", ConfigSignature: "v1", ConfigGeneration: mustTriggerGeneration(t, store, "github/intake"),
+		OccurrenceKey: "github.com/event/1", Subject: "https://github.com/owainlewis/machinist/issues/396", ScheduledAt: clock.Now(),
+		Prompt: "Complete issue", Repository: "machinist", SelectionName: "foreman", Command: testAgent("foreman", "Complete issue"),
+		GitHubRepository: "owainlewis/machinist", GitHubIssueNumber: 396, RequestActor: "owner", RequestLabel: "machinist:requested",
+	}
+	trackedJob, created, err := store.CreateTriggeredJob(t.Context(), admission)
+	if err != nil || !created {
+		t.Fatalf("triggered job = %q, %v, %v", trackedJob, created, err)
+	}
+	untrackedJob, err := store.CreateJob(t.Context(), "manual", "machinist", "plan", testAgent("plan", "manual"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = store.ReplaceRepositoryMirror(t.Context(), "machinist",
+		[]PullRequestMirror{{
+			Repository: "machinist", Number: 48, IssueNumber: 396,
+			URL: "https://github.com/owainlewis/machinist/pull/48", Title: "Ticket seam",
+			State: "open", ChecksState: ChecksPassing, ChecksPassed: 7, MergeStateStatus: "BLOCKED",
+			ReviewDecision: "APPROVED", HeadRefName: "machinist/396", BaseRefName: "main",
+			Additions: 140, Deletions: 12, ChangedFiles: 6, Commits: 3,
+			UpdatedAt: clock.Now().Add(-2 * time.Hour),
+		}},
+		[]IssueMirror{{
+			Repository: "machinist", Number: 396, URL: admission.Subject,
+			State: "open", Labels: []string{"machinist:queued", "serial"}, UpdatedAt: clock.Now(),
+		}}, clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]Job{}
+	for _, job := range snapshot.Jobs {
+		byID[job.ID] = job
+	}
+
+	tracked := byID[trackedJob]
+	if tracked.Outcome != OutcomeBlocked || !tracked.OutcomeFlagged {
+		t.Fatalf("outcome = %q flagged = %v, want %q true", tracked.Outcome, tracked.OutcomeFlagged, OutcomeBlocked)
+	}
+	if tracked.PullRequest == nil || tracked.PullRequest.Number != 48 || tracked.PullRequest.Commits != 3 {
+		t.Fatalf("pull request = %#v", tracked.PullRequest)
+	}
+	if tracked.Issue == nil || len(tracked.Issue.Labels) != 2 || tracked.Issue.Labels[1] != "serial" {
+		t.Fatalf("issue = %#v", tracked.Issue)
+	}
+
+	untracked := byID[untrackedJob]
+	if untracked.Outcome != OutcomeNone || untracked.PullRequest != nil || untracked.OutcomeFlagged {
+		t.Fatalf("untracked job = %#v", untracked)
 	}
 }
