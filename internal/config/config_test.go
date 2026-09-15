@@ -80,6 +80,32 @@ func TestLoadWorkerRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestLoadWorkerServesRegisteredRepositoriesUnlessListed(t *testing.T) {
+	for _, test := range []struct {
+		body       string
+		registered bool
+		err        string
+	}{
+		{body: "", registered: true},
+		{body: "serve_repositories = \"registered\"\n", registered: true},
+		{body: "serve_repositories = \"listed\"\n", registered: false},
+		{body: "serve_repositories = \"all\"\n", err: "serve_repositories must be"},
+	} {
+		path := filepath.Join(t.TempDir(), "worker.toml")
+		writeTestFile(t, path, "name = \"local\"\n"+test.body)
+		worker, err := LoadWorker(path)
+		if test.err != "" {
+			if err == nil || !strings.Contains(err.Error(), test.err) {
+				t.Fatalf("%q: error = %v", test.body, err)
+			}
+			continue
+		}
+		if err != nil || worker.ServesRegistered() != test.registered {
+			t.Fatalf("%q: serves registered = %v, error = %v", test.body, worker.ServesRegistered(), err)
+		}
+	}
+}
+
 func TestLoadManagedWorkerResolvesMachineConfiguration(t *testing.T) {
 	directory := t.TempDir()
 	writeTestFile(t, filepath.Join(directory, "token"), "secret\n")

@@ -36,7 +36,7 @@ machinist run \
 ```
 
 Use managed mode when the control plane and worker are already running. Pass the logical
-repository name from `worker.toml`:
+repository name registered on the control plane:
 
 ```sh
 machinist submit \

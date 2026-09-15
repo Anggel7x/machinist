@@ -39,8 +39,10 @@ slug = "owner/my-project"
 parallel = 3
 ```
 
-`machinist repo add owner/my-project --parallel 3` writes that block and validates the
-result. A repository with no `parallel` is bounded only by the control plane's
+Add one from the control plane's **Repositories** page, which writes that block, validates
+the result, and applies it without a restart. `machinist repo add owner/my-project
+--parallel 3` writes the same block from a shell; a running control plane applies it on
+its next restart. A repository with no `parallel` is bounded only by the control plane's
 `max_concurrent_jobs` under `[server]`; both limits apply, and the ceiling is enforced
 when a run is leased, so a hand-started worker is subject to it too.
 
@@ -58,9 +60,19 @@ max_workers = 2
 ```
 
 Each worker gets its own detached Git worktree under the worker data directory, reset to
-the checkout's head before every run, so several workers never share one index. A
-`[repositories.NAME]` entry with no `path` means the machine is willing to serve that
-repository and will clone it on first dispatch; an explicit `path` always wins.
+the checkout's head before every run, so several workers never share one index.
+
+A worker takes work for every repository the control plane registers and clones each on
+first dispatch, so registering a repository needs no worker change. A `[repositories.NAME]`
+entry with a `path` points that repository at an existing checkout, and an explicit `path`
+always wins. To restrict a machine to its own entries, set:
+
+```toml
+serve_repositories = "listed"
+```
+
+A listed entry with no `path` then means the machine serves that repository and clones it
+on first dispatch.
 
 ## Migration
 

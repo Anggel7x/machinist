@@ -656,7 +656,9 @@ func TestVersion(t *testing.T) {
 	}
 }
 
-func TestWorkerValidateRequiresRepository(t *testing.T) {
+// A worker serves every repository the control plane registers unless it
+// opts out, so only a worker restricted to its own list must name one.
+func TestWorkerValidateRequiresRepositoryOnlyWhenServingListed(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	if exitCode := Execute(t.Context(), []string{"init"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}, "test"); exitCode != 0 {
@@ -664,8 +666,21 @@ func TestWorkerValidateRequiresRepository(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
+	if exitCode := Execute(t.Context(), []string{"worker", "validate"}, strings.NewReader(""), &bytes.Buffer{}, &stderr, "test"); exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+
+	path := filepath.Join(home, ".machinist", "worker.toml")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append([]byte("serve_repositories = \"listed\"\n"), body...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
 	exitCode := Execute(t.Context(), []string{"worker", "validate"}, strings.NewReader(""), &bytes.Buffer{}, &stderr, "test")
-	if exitCode != 2 || !strings.Contains(stderr.String(), "requires at least one executor and repository") {
+	if exitCode != 2 || !strings.Contains(stderr.String(), "requires at least one repository") {
 		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
 }

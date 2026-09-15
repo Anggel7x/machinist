@@ -264,8 +264,9 @@ journalctl -u machinist-control-plane.service -f
 journalctl -u machinist-worker.service -f
 ```
 
-After changing `/home/machinist/.machinist/config.toml` or
-`/home/machinist/.machinist/worker.toml`, restart both:
+A repository added from the control plane's Repositories page applies immediately. After
+editing `/home/machinist/.machinist/config.toml` or
+`/home/machinist/.machinist/worker.toml` by hand, restart both:
 
 ```sh
 su - machinist

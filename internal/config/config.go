@@ -32,10 +32,20 @@ const (
 	legacyFactoryPrefix      = "{{factory."
 )
 
+// Values of a worker's serve_repositories.
+const (
+	ServeRegisteredRepositories = "registered"
+	ServeListedRepositories     = "listed"
+)
+
 type Worker struct {
 	Name          string `toml:"name"`
 	DataDirectory string `toml:"data_directory"`
 	MaxWorkers    *int   `toml:"max_workers"`
+	// ServeRepositories is "registered" (the default) to take work for every
+	// repository the control plane registers, or "listed" to take work only
+	// for the [repositories] entries below.
+	ServeRepositories string `toml:"serve_repositories"`
 	// Host is the machine's identity in the pool, kept when a pooled worker
 	// takes a name of its own so the dashboard can group by machine without
 	// guessing at name shapes.
@@ -45,6 +55,10 @@ type Worker struct {
 	Repositories map[string]Repository `toml:"repositories"`
 	configDir    string
 }
+
+// ServesRegistered reports whether this host takes work for every repository
+// the control plane registers, rather than only the ones it lists.
+func (w Worker) ServesRegistered() bool { return w.ServeRepositories != ServeListedRepositories }
 
 // PoolSize is how many workers this host is willing to run at once. It is a
 // capability of the machine, not a policy about any repository: per-repository
@@ -539,6 +553,14 @@ func applyWorkerDefaults(worker Worker) (Worker, error) {
 func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, error)) (Worker, error) {
 	if worker.MaxWorkers != nil && *worker.MaxWorkers <= 0 {
 		return Worker{}, errors.New("max_workers must be positive")
+	}
+	switch strings.TrimSpace(worker.ServeRepositories) {
+	case "", ServeRegisteredRepositories:
+		worker.ServeRepositories = ServeRegisteredRepositories
+	case ServeListedRepositories:
+		worker.ServeRepositories = ServeListedRepositories
+	default:
+		return Worker{}, fmt.Errorf("serve_repositories must be %q or %q", ServeRegisteredRepositories, ServeListedRepositories)
 	}
 	worker.Name = strings.TrimSpace(worker.Name)
 	if worker.Name == "" {

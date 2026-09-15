@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -35,8 +36,11 @@ const workerAvailabilityWindow = 15 * time.Second
 var webAssets embed.FS
 
 type Server struct {
-	store             *Store
-	definitionPath    string
+	store          *Store
+	definitionPath string
+	// policyMu guards the configuration-derived policy below, which a
+	// repository registration replaces while the control plane runs.
+	policyMu          sync.RWMutex
 	triggers          []config.ResolvedTrigger
 	github            githubTriggerClient
 	schedulerEvery    time.Duration
@@ -46,16 +50,49 @@ type Server struct {
 	maxConcurrentJobs int
 	repositoryCeiling map[string]int
 	repositorySlugs   map[string]string
-	workerToken       string
-	csrfToken         string
-	handler           http.Handler
+	// registrationMu keeps configuration writes and the policy they produce
+	// in the same order.
+	registrationMu sync.Mutex
+	// schedulerMu guards supervisor, set only while trigger loops run.
+	schedulerMu sync.Mutex
+	supervisor  *triggerSupervisor
+	workerToken string
+	csrfToken   string
+	handler     http.Handler
+}
+
+// triggerSupervisor accepts policy changes, which it applies only while no
+// trigger loop is running. stopped closes when it no longer accepts them.
+type triggerSupervisor struct {
+	inbox   chan reconfiguration
+	stopped chan struct{}
+}
+
+type reconfiguration struct {
+	apply func() error
+	done  chan error
+}
+
+// policy is everything the control plane derives from config.toml at once.
+type policy struct {
+	triggers    []config.ResolvedTrigger
+	definitions []TriggerDefinition
+	ceilings    map[string]int
+	slugs       map[string]string
 }
 
 type statusResponse struct {
 	Snapshot
-	Commands     []string `json:"commands"`
-	Repositories []string `json:"repositories"`
-	CSRFToken    string   `json:"csrf_token"`
+	Commands               []string                        `json:"commands"`
+	Repositories           []string                        `json:"repositories"`
+	RegisteredRepositories []config.RepositoryRegistration `json:"registered_repositories"`
+	CSRFToken              string                          `json:"csrf_token"`
+}
+
+type registerRepositoryRequest struct {
+	Slug     string `json:"slug"`
+	Name     string `json:"name"`
+	Parallel int    `json:"parallel"`
 }
 
 type submitRequest struct {
@@ -90,39 +127,19 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	if err != nil {
 		return nil, err
 	}
-	managedTriggers, err := config.LoadTriggers(definitionPath)
+	loaded, err := loadPolicy(definitionPath, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
-	definition, err := config.LoadDefinitions(definitionPath)
-	if err != nil {
-		return nil, err
-	}
-	ceilings, err := definition.RepositoryCeilings()
-	if err != nil {
-		return nil, err
-	}
-	slugs, err := definition.RepositorySlugs()
-	if err != nil {
-		return nil, err
-	}
-	startup := time.Now().UTC()
-	definitions := make([]TriggerDefinition, 0, len(managedTriggers))
-	for _, trigger := range managedTriggers {
-		definitions = append(definitions, TriggerDefinition{
-			Identity: trigger.Identity, Family: trigger.Family,
-			ConfigSignature: trigger.Signature, NextDueAt: trigger.FirstDue(startup),
-		})
-	}
-	if err := store.SyncTriggers(context.Background(), definitions); err != nil {
+	if err := store.SyncTriggers(context.Background(), loaded.definitions); err != nil {
 		return nil, fmt.Errorf("restore managed triggers: %w", err)
 	}
 	server := &Server{
-		store: store, definitionPath: definitionPath, triggers: managedTriggers,
+		store: store, definitionPath: definitionPath, triggers: loaded.triggers,
 		github: NewGitHubCLI("gh", 30*time.Second), now: time.Now,
 		schedulerEvery: 30 * time.Second, shutdownTimeout: 5 * time.Second,
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
-		maxConcurrentJobs: maxConcurrentJobs, repositoryCeiling: ceilings, repositorySlugs: slugs,
+		maxConcurrentJobs: maxConcurrentJobs, repositoryCeiling: loaded.ceilings, repositorySlugs: loaded.slugs,
 		workerToken: workerToken, csrfToken: csrfToken,
 	}
 	server.handler, err = server.routes()
@@ -134,10 +151,99 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 
 func (s *Server) Handler() http.Handler { return s.handler }
 
+func loadPolicy(definitionPath string, now time.Time) (policy, error) {
+	triggers, err := config.LoadTriggers(definitionPath)
+	if err != nil {
+		return policy{}, err
+	}
+	definition, err := config.LoadDefinitions(definitionPath)
+	if err != nil {
+		return policy{}, err
+	}
+	ceilings, err := definition.RepositoryCeilings()
+	if err != nil {
+		return policy{}, err
+	}
+	slugs, err := definition.RepositorySlugs()
+	if err != nil {
+		return policy{}, err
+	}
+	definitions := make([]TriggerDefinition, 0, len(triggers))
+	for _, trigger := range triggers {
+		definitions = append(definitions, TriggerDefinition{
+			Identity: trigger.Identity, Family: trigger.Family,
+			ConfigSignature: trigger.Signature, NextDueAt: trigger.FirstDue(now),
+		})
+	}
+	return policy{triggers: triggers, definitions: definitions, ceilings: ceilings, slugs: slugs}, nil
+}
+
 // dispatchLimits is the policy a poll is judged against: the control plane's
 // own job limit plus each repository's declared ceiling.
 func (s *Server) dispatchLimits() dispatchLimits {
+	s.policyMu.RLock()
+	defer s.policyMu.RUnlock()
 	return dispatchLimits{MaxConcurrentJobs: s.maxConcurrentJobs, RepositoryCeilings: s.repositoryCeiling}
+}
+
+// Policy maps are replaced whole and never mutated, so a reader may keep the
+// map it was handed after the lock is released.
+func (s *Server) currentSlugs() map[string]string {
+	s.policyMu.RLock()
+	defer s.policyMu.RUnlock()
+	return s.repositorySlugs
+}
+
+func (s *Server) currentTriggers() []config.ResolvedTrigger {
+	s.policyMu.RLock()
+	defer s.policyMu.RUnlock()
+	return s.triggers
+}
+
+func (s *Server) registeredRepositories() []config.RepositoryRegistration {
+	s.policyMu.RLock()
+	defer s.policyMu.RUnlock()
+	registered := make([]config.RepositoryRegistration, 0, len(s.repositorySlugs))
+	for _, name := range slices.Sorted(maps.Keys(s.repositorySlugs)) {
+		registered = append(registered, config.RepositoryRegistration{Name: name, Slug: s.repositorySlugs[name], Parallel: s.repositoryCeiling[name]})
+	}
+	return registered
+}
+
+// reloadPolicy re-reads config.toml and puts the result into effect: trigger
+// state is synchronised exactly as a restart would, and the trigger loops are
+// restarted around the change so none of them runs against a stale signature.
+func (s *Server) reloadPolicy(ctx context.Context) error {
+	loaded, err := loadPolicy(s.definitionPath, s.now().UTC())
+	if err != nil {
+		return err
+	}
+	// The change must finish once started even if the caller goes away, or
+	// the configuration and the durable trigger state would disagree.
+	apply := func() error {
+		if err := s.store.SyncTriggers(context.WithoutCancel(ctx), loaded.definitions); err != nil {
+			return fmt.Errorf("synchronise managed triggers: %w", err)
+		}
+		s.policyMu.Lock()
+		s.triggers, s.repositoryCeiling, s.repositorySlugs = loaded.triggers, loaded.ceilings, loaded.slugs
+		s.policyMu.Unlock()
+		return nil
+	}
+	s.schedulerMu.Lock()
+	supervisor := s.supervisor
+	s.schedulerMu.Unlock()
+	if supervisor == nil {
+		return apply()
+	}
+	change := reconfiguration{apply: apply, done: make(chan error, 1)}
+	select {
+	case supervisor.inbox <- change:
+		return <-change.done
+	case <-supervisor.stopped:
+		return apply()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Server) Serve(ctx context.Context, listen string, onListening func(net.Addr)) error {
@@ -227,19 +333,55 @@ func (s *Server) runScheduler(ctx context.Context) error {
 			}
 		}()
 	}
-	for _, trigger := range s.triggers {
-		loop(false, func(ctx context.Context) error {
-			if err := s.processManagedTrigger(ctx, trigger); err != nil {
-				return fmt.Errorf("trigger %q: %w", trigger.Identity, err)
-			}
-			return nil
-		})
-	}
 	loop(true, s.maintainState)
 	loop(false, s.mirrorGitHubOutcomes)
-	<-ctx.Done()
+	s.superviseTriggers(ctx)
 	schedulers.Wait()
 	return nil
+}
+
+// superviseTriggers runs one loop per managed trigger until ctx ends. A
+// reconfiguration stops every loop, applies the change, and starts the loops
+// the new configuration declares.
+func (s *Server) superviseTriggers(ctx context.Context) {
+	supervisor := &triggerSupervisor{inbox: make(chan reconfiguration), stopped: make(chan struct{})}
+	s.schedulerMu.Lock()
+	s.supervisor = supervisor
+	s.schedulerMu.Unlock()
+	defer func() {
+		s.schedulerMu.Lock()
+		s.supervisor = nil
+		s.schedulerMu.Unlock()
+		close(supervisor.stopped)
+	}()
+	for {
+		triggerCtx, stopTriggers := context.WithCancel(ctx)
+		var loops sync.WaitGroup
+		for _, trigger := range s.currentTriggers() {
+			loops.Add(1)
+			go func() {
+				defer loops.Done()
+				for {
+					if err := s.processManagedTrigger(triggerCtx, trigger); err != nil {
+						s.reportSchedulerError(fmt.Errorf("trigger %q: %w", trigger.Identity, err))
+					}
+					if !sleep(triggerCtx, s.schedulerEvery) {
+						return
+					}
+				}
+			}()
+		}
+		select {
+		case <-ctx.Done():
+			stopTriggers()
+			loops.Wait()
+			return
+		case change := <-supervisor.inbox:
+			stopTriggers()
+			loops.Wait()
+			change.done <- change.apply()
+		}
+	}
 }
 
 // sleep waits for the duration and reports false when ctx ends first.
@@ -277,6 +419,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
 	mux.HandleFunc("POST /api/v1/jobs", s.authorizeSubmission(s.submit))
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", s.authorizeSubmission(s.deleteJob))
+	mux.HandleFunc("POST /api/v1/repositories", s.authorizeSubmission(s.registerRepository))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
@@ -328,11 +471,56 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(response, http.StatusOK, statusResponse{
-		Snapshot:     snapshot,
-		Commands:     definition.CommandNames(),
-		Repositories: repositories,
-		CSRFToken:    s.csrfToken,
+		Snapshot:               snapshot,
+		Commands:               definition.CommandNames(),
+		Repositories:           repositories,
+		RegisteredRepositories: s.registeredRepositories(),
+		CSRFToken:              s.csrfToken,
 	})
+}
+
+// knownRepositories is every repository a job may name: those a worker has
+// advertised, and those registered here for workers that serve every
+// registered repository.
+func (s *Server) knownRepositories(ctx context.Context) ([]string, error) {
+	advertised, err := s.store.KnownRepositories(ctx)
+	if err != nil {
+		return nil, err
+	}
+	known := append(advertised, slices.Collect(maps.Keys(s.currentSlugs()))...)
+	slices.Sort(known)
+	return slices.Compact(known), nil
+}
+
+func (s *Server) registerRepository(response http.ResponseWriter, request *http.Request) {
+	if !limitRequestBody(response, request, maxRequestBytes) {
+		return
+	}
+	var input registerRepositoryRequest
+	if err := decodeJSON(request, &input); err != nil {
+		writeDecodeError(response, err)
+		return
+	}
+	s.registrationMu.Lock()
+	defer s.registrationMu.Unlock()
+	registered, err := config.RegisterRepository(s.definitionPath, input.Slug, input.Name, input.Parallel)
+	switch {
+	case errors.Is(err, config.ErrRepositoryExists):
+		writeError(response, http.StatusConflict, err)
+		return
+	case errors.Is(err, config.ErrInvalidRepository):
+		writeError(response, http.StatusBadRequest, err)
+		return
+	case err != nil:
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.reloadPolicy(request.Context()); err != nil {
+		log.Printf("apply repository %q: %v", registered.Name, err)
+		writeError(response, http.StatusInternalServerError, fmt.Errorf("registered %q in config.toml but could not apply it; restart the control plane: %w", registered.Name, err))
+		return
+	}
+	writeJSON(response, http.StatusCreated, registered)
 }
 
 func (s *Server) catalog(response http.ResponseWriter, request *http.Request) {
@@ -341,7 +529,7 @@ func (s *Server) catalog(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
-	repositories, repositoryErr := s.store.KnownRepositories(request.Context())
+	repositories, repositoryErr := s.knownRepositories(request.Context())
 	if repositoryErr != nil {
 		writeError(response, http.StatusInternalServerError, repositoryErr)
 		return
@@ -366,7 +554,7 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, errors.New("repository is required"))
 		return
 	}
-	repositories, repositoryErr := s.store.KnownRepositories(request.Context())
+	repositories, repositoryErr := s.knownRepositories(request.Context())
 	if repositoryErr != nil {
 		writeError(response, http.StatusInternalServerError, repositoryErr)
 		return
@@ -433,11 +621,15 @@ func (s *Server) poll(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, errors.New("worker instance_id and name are required"))
 		return
 	}
+	slugs := s.currentSlugs()
+	if input.ServeRegistered {
+		input.Repositories = append(input.Repositories, slices.Collect(maps.Keys(slugs))...)
+	}
 	run, err := s.store.poll(request.Context(), input, s.dispatchLimits())
 	if run != nil {
 		// The worker may have no checkout for this repository yet, so it is
 		// told where the repository lives as well as what it is called.
-		run.RepositorySlug = s.repositorySlugs[run.Repository]
+		run.RepositorySlug = slugs[run.Repository]
 	}
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)

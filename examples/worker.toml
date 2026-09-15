@@ -8,6 +8,11 @@ data_directory = "~/.machinist/worker"
 # own Git worktree, so they never share an index.
 # max_workers = 2
 
+# Which repositories this machine takes work for. "registered" (the default)
+# takes every repository the control plane registers, cloning each on first
+# dispatch; "listed" takes only the [repositories] entries below.
+# serve_repositories = "listed"
+
 [control_plane]
 url = "http://127.0.0.1:7331"
 token_file = "~/.machinist/server/worker.token"
@@ -20,8 +25,8 @@ models = { luna = "gpt-5.6-luna", terra = "gpt-5.6-terra", sol = "gpt-5.6-sol" }
 command = ["claude", "--print", "--verbose", "--output-format", "stream-json", "--model={{machinist.model}}", "--dangerously-skip-permissions"]
 models = { haiku = "haiku", sonnet = "sonnet", opus = "opus" }
 
-# Register each repository that managed workers may run in. `path` points at an
-# existing checkout and always wins; a declaration with no path means this host
-# is willing to serve the repository and will clone it on first dispatch.
+# Point a repository at an existing checkout on this machine; `path` always wins
+# over a clone. With serve_repositories = "listed", an entry with no path means
+# this host serves that repository and clones it on first dispatch.
 # [repositories.my-project]
 # path = "/absolute/path/to/my-project"

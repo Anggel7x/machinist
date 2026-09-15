@@ -35,13 +35,14 @@ type githubTriggerClient interface {
 // This pass only reads. Adjudicating and merging belongs to the repository's
 // own policy workflow, and nothing here writes to GitHub.
 func (s *Server) mirrorGitHubOutcomes(ctx context.Context) error {
-	if len(s.repositorySlugs) == 0 {
+	slugs := s.currentSlugs()
+	if len(slugs) == 0 {
 		return nil
 	}
 	fetchedAt := s.now().UTC()
 	var failures []error
-	for _, repository := range slices.Sorted(maps.Keys(s.repositorySlugs)) {
-		slug := s.repositorySlugs[repository]
+	for _, repository := range slices.Sorted(maps.Keys(slugs)) {
+		slug := slugs[repository]
 		pulls, err := s.github.ListPullRequests(ctx, slug, mirrorPageSize)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("mirror %s pull requests: %w", slug, err))
