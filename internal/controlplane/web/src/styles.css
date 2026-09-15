@@ -31,6 +31,9 @@
   --color-warning: var(--warning);
   --color-danger: var(--danger);
   --color-ring: var(--ring);
+  /* Tokens beUI components read, mapped onto this palette. */
+  --color-card: var(--surface);
+  --color-destructive: var(--danger);
   --shadow-xs: 0 1px 2px rgb(0 0 0 / .05);
 }
 
@@ -105,6 +108,8 @@ main h2 { letter-spacing: -.012em; }
 .field-control { min-height: 2.5rem; width: 100%; border: 1px solid var(--border); border-radius: 6px; outline: none; background: var(--background); padding: 0.625rem 0.75rem; color: var(--foreground); font-size: 0.875rem; line-height: 1.25rem; transition: border-color .15s ease, box-shadow .15s ease; }
 .field-control::placeholder { color: var(--muted-foreground); opacity: .7; }
 .field-control:focus { border-color: var(--foreground); box-shadow: 0 0 0 3px color-mix(in srgb, var(--foreground) 12%, transparent); }
+
+@utility scrollbar-hide { scrollbar-width: none; &::-webkit-scrollbar { display: none; } }
 
 /* Alarm without colour: a solid ink rule against a flat wash. */
 .alert { display: flex; gap: .625rem; border: 1px solid var(--border); border-left: 3px solid var(--foreground); border-radius: 6px; background: var(--muted); padding: .55rem .75rem; color: var(--foreground); font-size: .875rem; line-height: 1.25rem; }

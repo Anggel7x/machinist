@@ -788,6 +788,23 @@ func (g *GitHubCLI) ListPullRequests(ctx context.Context, repository string, lim
 	return mirrors, nil
 }
 
+// PullRequestDiff reads a pull request's unified diff as GitHub currently
+// reports it. Like the mirror, it only reads.
+func (g *GitHubCLI) PullRequestDiff(ctx context.Context, repository string, number int) (string, error) {
+	repository, err := normalizeGitHubRepository(repository)
+	if err != nil {
+		return "", err
+	}
+	if number <= 0 {
+		return "", errors.New("github pull request number must be positive")
+	}
+	stdout, err := g.run(ctx, "read pull request diff", []string{"pr", "diff", strconv.Itoa(number), "--repo", repository})
+	if err != nil {
+		return "", err
+	}
+	return string(stdout), nil
+}
+
 // ListIssues mirrors one repository's recent issues so the dashboard can show
 // live ticket state and labels. The limit bounds it to the active window;
 // issues outside that window keep whatever was last mirrored.

@@ -523,3 +523,31 @@ func TestGitHubCLIHandlesPullRequestSubjects(t *testing.T) {
 		t.Fatal("a labelled pull request must satisfy only a pull request trigger")
 	}
 }
+
+func TestGitHubCLIPullRequestDiffReadsOnePullRequest(t *testing.T) {
+	cli, runner := newScriptedGitHubCLI(scriptedGitHubResult{stdout: "diff --git a/x b/x\n+y\n"})
+	diff, err := cli.PullRequestDiff(context.Background(), " o/r ", 12)
+	if err != nil || diff != "diff --git a/x b/x\n+y\n" {
+		t.Fatalf("diff = %q, %v", diff, err)
+	}
+	if want := [][]string{{"test-gh", "pr", "diff", "12", "--repo", "o/r"}}; !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("calls = %v, want %v", runner.calls, want)
+	}
+
+	if _, err := cli.PullRequestDiff(context.Background(), "o/r;touch bad", 12); err == nil {
+		t.Fatal("unsafe repository was accepted")
+	}
+	if _, err := cli.PullRequestDiff(context.Background(), "o/r", 0); err == nil {
+		t.Fatal("non-positive number was accepted")
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("invalid input reached executable: %v", runner.calls)
+	}
+
+	failing, _ := newScriptedGitHubCLI(scriptedGitHubResult{stderr: "HTTP 401: Bad credentials ghp_abcdef123", err: errors.New("exit status 1")})
+	_, err = failing.PullRequestDiff(context.Background(), "o/r", 12)
+	var cliErr *GitHubCLIError
+	if !errors.As(err, &cliErr) || cliErr.Kind != GitHubCLIErrorAuth || strings.Contains(err.Error(), "ghp_abcdef123") {
+		t.Fatalf("error = %v, want sanitized authentication error", err)
+	}
+}

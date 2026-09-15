@@ -1134,27 +1134,16 @@ func (s *Store) attachGitHubOutcomes(ctx context.Context, jobs []Job) error {
 
 func (s *Store) readGitHubMirror(ctx context.Context) (map[mirrorKey]PullRequestMirror, map[mirrorKey]IssueMirror, error) {
 	pulls := map[mirrorKey]PullRequestMirror{}
-	rows, err := s.db.QueryContext(ctx, `SELECT repository,number,url,title,state,is_draft,mergeable,merge_state_status,review_decision,merged_at,
-head_ref_name,head_ref_oid,base_ref_name,additions,deletions,changed_files,
-checks_state,checks_passed,checks_failed,checks_pending,issue_number,created_at,updated_at,fetched_at
-FROM github_pull_requests WHERE issue_number>0 ORDER BY number`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+pullRequestMirrorColumns+` FROM github_pull_requests WHERE issue_number>0 ORDER BY number`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read mirrored pull requests: %w", err)
 	}
 	for rows.Next() {
-		var pull PullRequestMirror
-		var mergedAt, createdAt, updatedAt, fetchedAt string
-		if err := rows.Scan(&pull.Repository, &pull.Number, &pull.URL, &pull.Title, &pull.State, &pull.IsDraft, &pull.Mergeable,
-			&pull.MergeStateStatus, &pull.ReviewDecision, &mergedAt, &pull.HeadRefName, &pull.HeadRefOID, &pull.BaseRefName,
-			&pull.Additions, &pull.Deletions, &pull.ChangedFiles,
-			&pull.ChecksState, &pull.ChecksPassed, &pull.ChecksFailed, &pull.ChecksPending, &pull.IssueNumber, &createdAt, &updatedAt, &fetchedAt); err != nil {
+		pull, err := scanPullRequestMirror(rows.Scan)
+		if err != nil {
 			rows.Close()
 			return nil, nil, err
 		}
-		pull.MergedAt = parseStoredTime(mergedAt)
-		pull.CreatedAt = parseStoredTime(createdAt)
-		pull.UpdatedAt = parseStoredTime(updatedAt)
-		pull.FetchedAt = parseStoredTime(fetchedAt)
 		key := mirrorKey{repository: pull.Repository, number: pull.IssueNumber}
 		// A later pull request wins, so a reopened issue reports its newest work.
 		if existing, ok := pulls[key]; !ok || pull.Number > existing.Number {
@@ -1186,6 +1175,52 @@ FROM github_pull_requests WHERE issue_number>0 ORDER BY number`)
 		issues[mirrorKey{repository: issue.Repository, number: issue.Number}] = issue
 	}
 	return pulls, issues, issueRows.Err()
+}
+
+const pullRequestMirrorColumns = `repository,number,url,title,state,is_draft,mergeable,merge_state_status,review_decision,merged_at,
+head_ref_name,head_ref_oid,base_ref_name,additions,deletions,changed_files,
+checks_state,checks_passed,checks_failed,checks_pending,issue_number,created_at,updated_at,fetched_at`
+
+func scanPullRequestMirror(scan func(...any) error) (PullRequestMirror, error) {
+	var pull PullRequestMirror
+	var mergedAt, createdAt, updatedAt, fetchedAt string
+	if err := scan(&pull.Repository, &pull.Number, &pull.URL, &pull.Title, &pull.State, &pull.IsDraft, &pull.Mergeable,
+		&pull.MergeStateStatus, &pull.ReviewDecision, &mergedAt, &pull.HeadRefName, &pull.HeadRefOID, &pull.BaseRefName,
+		&pull.Additions, &pull.Deletions, &pull.ChangedFiles,
+		&pull.ChecksState, &pull.ChecksPassed, &pull.ChecksFailed, &pull.ChecksPending, &pull.IssueNumber, &createdAt, &updatedAt, &fetchedAt); err != nil {
+		return PullRequestMirror{}, err
+	}
+	pull.MergedAt = parseStoredTime(mergedAt)
+	pull.CreatedAt = parseStoredTime(createdAt)
+	pull.UpdatedAt = parseStoredTime(updatedAt)
+	pull.FetchedAt = parseStoredTime(fetchedAt)
+	return pull, nil
+}
+
+// JobPullRequest is the mirrored pull request a snapshot would attach to one
+// job, read without building the whole snapshot. It returns sql.ErrNoRows for
+// an unknown job and a nil pull request for a job with none.
+func (s *Store) JobPullRequest(ctx context.Context, jobID string) (*PullRequestMirror, error) {
+	var repository string
+	var issueNumber int
+	if err := s.db.QueryRowContext(ctx, `SELECT j.repository,
+COALESCE((SELECT g.issue_number FROM github_trigger_requests g WHERE g.job_id=j.id ORDER BY g.rowid DESC LIMIT 1),0)
+FROM jobs j WHERE j.id=?`, jobID).Scan(&repository, &issueNumber); err != nil {
+		return nil, err
+	}
+	if issueNumber <= 0 {
+		return nil, nil
+	}
+	// The newest pull request wins, as it does in a snapshot.
+	pull, err := scanPullRequestMirror(s.db.QueryRowContext(ctx, `SELECT `+pullRequestMirrorColumns+`
+FROM github_pull_requests WHERE repository=? AND issue_number=? ORDER BY number DESC LIMIT 1`, repository, issueNumber).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read mirrored pull request: %w", err)
+	}
+	return &pull, nil
 }
 
 // ReplaceRepositoryMirror records one repository's mirrored GitHub state. Rows

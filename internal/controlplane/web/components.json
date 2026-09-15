@@ -5,5 +5,6 @@
   "tsx": false,
   "tailwind": { "css": "src/styles.css", "baseColor": "neutral", "cssVariables": true },
   "aliases": { "components": "@/components", "utils": "@/lib/utils", "ui": "@/components/ui", "lib": "@/lib" },
-  "iconLibrary": "lucide"
+  "iconLibrary": "lucide",
+  "registries": { "@beui": "https://beui.dev/r/{name}.json" }
 }

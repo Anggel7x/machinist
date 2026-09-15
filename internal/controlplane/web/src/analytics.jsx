@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { AnimatedNumber } from "@/components/motion/animated-number";
 import { Card } from "@/components/ui/card";
 import { PageHeading, QuietState } from "@/components/ui/page-heading";
 import { analyticsState } from "@/analytics-state";
@@ -52,5 +53,5 @@ export function Analytics({ jobs, loaded, error }) {
   </div>;
 }
 
-function Metric({ label, value }) { return <Card className="min-w-0 p-4 sm:p-5"><p className="text-xs font-medium text-muted-foreground sm:text-sm">{label}</p><p className="mt-2 text-xl font-semibold tracking-tight tabular-nums sm:text-3xl">{value}</p></Card>; }
+function Metric({ label, value }) { return <Card className="min-w-0 p-4 sm:p-5"><p className="text-xs font-medium text-muted-foreground sm:text-sm">{label}</p><p className="mt-2 text-xl font-semibold tracking-tight tabular-nums sm:text-3xl">{typeof value === "number" ? <AnimatedNumber value={value} duration={0.6} /> : value}</p></Card>; }
 function shortId(id) { const [, value = id] = id.split("_", 2); return value.slice(0, 8); }

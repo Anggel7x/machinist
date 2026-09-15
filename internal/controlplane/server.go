@@ -1,10 +1,13 @@
 package controlplane
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"crypto/subtle"
 	"database/sql"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,6 +110,21 @@ type registerRepositoryRequest struct {
 	Slug     string `json:"slug"`
 	Name     string `json:"name"`
 	Parallel int    `json:"parallel"`
+}
+
+type transcriptResponse struct {
+	RunID     string `json:"run_id"`
+	Stdout    string `json:"stdout"`
+	Truncated bool   `json:"truncated"`
+}
+
+type pullRequestDiffResponse struct {
+	Repository string `json:"repository"`
+	Number     int    `json:"number"`
+	URL        string `json:"url"`
+	HeadRefOID string `json:"head_ref_oid"`
+	Diff       string `json:"diff"`
+	Truncated  bool   `json:"truncated"`
 }
 
 type submitRequest struct {
@@ -431,6 +449,8 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/status", s.status)
 	mux.HandleFunc("GET /api/v1/catalog", s.catalog)
 	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
+	mux.HandleFunc("GET /api/v1/runs/{id}/transcript", s.transcript)
+	mux.HandleFunc("GET /api/v1/jobs/{id}/diff", s.pullRequestDiff)
 	mux.HandleFunc("POST /api/v1/jobs", s.authorizeSubmission(s.submit))
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", s.authorizeSubmission(s.deleteJob))
 	mux.HandleFunc("POST /api/v1/repositories", s.authorizeSubmission(s.registerRepository))
@@ -673,6 +693,130 @@ func (s *Server) deleteJob(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 	response.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) transcript(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("Cache-Control", "no-store")
+	runID := request.PathValue("id")
+	output, err := s.store.RunOutput(request.Context(), runID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(response, http.StatusNotFound, errors.New("run not found"))
+		return
+	}
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	stdout, truncated := recordedStdout(output.Events)
+	writeJSON(response, http.StatusOK, transcriptResponse{RunID: runID, Stdout: stdout, Truncated: truncated})
+}
+
+// recordedStdout reassembles an executor's stdout from a run's JSONL event log
+// (see runner.Event). Chunks are joined as bytes before becoming text, because
+// a chunk boundary can fall inside a UTF-8 sequence. A line that does not
+// decode is skipped rather than failing the whole transcript. truncated reports
+// that the runner stopped recording output.
+func recordedStdout(events string) (string, bool) {
+	type chunk struct {
+		sequence int64
+		data     []byte
+	}
+	var chunks []chunk
+	truncated := false
+	for line := range strings.SplitSeq(events, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var event struct {
+			Sequence int64  `json:"sequence"`
+			Type     string `json:"type"`
+			Stream   string `json:"stream"`
+			Encoding string `json:"encoding"`
+			Data     string `json:"data"`
+		}
+		if json.Unmarshal([]byte(line), &event) != nil {
+			continue
+		}
+		switch {
+		case event.Type == "process.output_truncated":
+			truncated = true
+		case event.Type == "process.output" && event.Stream == "stdout" && event.Encoding == "base64":
+			data, err := base64.StdEncoding.DecodeString(event.Data)
+			if err != nil {
+				continue
+			}
+			chunks = append(chunks, chunk{sequence: event.Sequence, data: data})
+		}
+	}
+	slices.SortStableFunc(chunks, func(left, right chunk) int { return cmp.Compare(left.sequence, right.sequence) })
+	var stdout bytes.Buffer
+	for _, chunk := range chunks {
+		stdout.Write(chunk.data)
+	}
+	return stdout.String(), truncated
+}
+
+// maxDiffBytes bounds the diff a job view carries; a larger change is better
+// read on GitHub than in a browser tab.
+const maxDiffBytes = 2 << 20
+
+func (s *Server) pullRequestDiff(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("Cache-Control", "no-store")
+	pull, err := s.store.JobPullRequest(request.Context(), request.PathValue("id"))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(response, http.StatusNotFound, errors.New("job not found"))
+		return
+	}
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	if pull == nil {
+		writeError(response, http.StatusNotFound, errors.New("no pull request"))
+		return
+	}
+	repository := pullRequestSlug(*pull, s.currentSlugs())
+	diff, err := s.github.PullRequestDiff(request.Context(), repository, pull.Number)
+	if err != nil {
+		// GitHubCLIError details are already sanitized, and a validation error
+		// names only the repository.
+		log.Printf("read diff for %s#%d: %v", repository, pull.Number, err)
+		writeError(response, http.StatusBadGateway, err)
+		return
+	}
+	diff, truncated := truncateDiff(diff, maxDiffBytes)
+	writeJSON(response, http.StatusOK, pullRequestDiffResponse{
+		Repository: repository, Number: pull.Number, URL: pull.URL, HeadRefOID: pull.HeadRefOID,
+		Diff: diff, Truncated: truncated,
+	})
+}
+
+// pullRequestSlug is the GitHub owner/name of a mirrored pull request. Mirror
+// rows are keyed by the logical repository name, so the slug comes from the
+// registration, or from the pull request's own URL once that is gone.
+func pullRequestSlug(pull PullRequestMirror, slugs map[string]string) string {
+	if slug := slugs[pull.Repository]; slug != "" {
+		return slug
+	}
+	path, ok := strings.CutPrefix(pull.URL, "https://github.com/")
+	if !ok {
+		return pull.Repository
+	}
+	owner, rest, _ := strings.Cut(path, "/")
+	name, _, _ := strings.Cut(rest, "/")
+	return owner + "/" + name
+}
+
+// truncateDiff keeps at most limit bytes of diff, cut after the last whole line
+// that fits.
+func truncateDiff(diff string, limit int) (string, bool) {
+	if len(diff) <= limit {
+		return diff, false
+	}
+	if cut := strings.LastIndexByte(diff[:limit], '\n'); cut >= 0 {
+		return diff[:cut+1], true
+	}
+	return diff[:limit], true
 }
 
 func (s *Server) poll(response http.ResponseWriter, request *http.Request) {

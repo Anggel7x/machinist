@@ -3,6 +3,7 @@ package controlplane
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
@@ -860,4 +861,204 @@ func deleteRequest(t *testing.T, endpoint string, headers map[string]string) *ht
 		t.Fatal(err)
 	}
 	return response
+}
+
+func TestRecordedStdoutJoinsChunksAsBytesAndSkipsWhatItCannotRead(t *testing.T) {
+	// "é" is two bytes; the runner may record them in separate chunks.
+	accent := []byte("é")
+	lines := []string{
+		stdoutEvent(t, 3, "stdout", append([]byte{accent[1]}, " done\n"...)),
+		stdoutEvent(t, 1, "stdout", []byte("caf")),
+		stdoutEvent(t, 2, "stdout", []byte{accent[0]}),
+		stdoutEvent(t, 4, "stderr", []byte("warning\n")),
+		`{"sequence":5,"type":"process.output","stream":"stdout","encoding":"base64","data":"not base64!"}`,
+		`{"sequence":6,"type":"process.outp`,
+		"",
+	}
+	stdout, truncated := recordedStdout(strings.Join(lines, "\n"))
+	if stdout != "café done\n" || truncated {
+		t.Fatalf("stdout = %q, truncated = %v", stdout, truncated)
+	}
+
+	lines = append(lines, `{"sequence":7,"type":"process.output_truncated","message":"recording stopped"}`)
+	if stdout, truncated := recordedStdout(strings.Join(lines, "\n")); stdout != "café done\n" || !truncated {
+		t.Fatalf("truncated stdout = %q, truncated = %v", stdout, truncated)
+	}
+	if stdout, truncated := recordedStdout(""); stdout != "" || truncated {
+		t.Fatalf("empty log = %q, %v", stdout, truncated)
+	}
+}
+
+func TestServerServesRunTranscript(t *testing.T) {
+	server, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+
+	missing := getResponse(t, webServer.URL+"/api/v1/runs/missing/transcript")
+	if missing.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing run status = %d", missing.StatusCode)
+	}
+	missing.Body.Close()
+
+	if _, err := server.store.CreateJob(t.Context(), "request", "machinist", "plan", testAgent("plan", "Plan request")); err != nil {
+		t.Fatal(err)
+	}
+	run, err := server.store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
+	if err != nil || run == nil {
+		t.Fatalf("poll = %#v, %v", run, err)
+	}
+	var pending transcriptResponse
+	decodeResponse(t, getResponse(t, webServer.URL+"/api/v1/runs/"+run.ID+"/transcript"), http.StatusOK, &pending)
+	if pending.RunID != run.ID || pending.Stdout != "" || pending.Truncated {
+		t.Fatalf("pending transcript = %#v", pending)
+	}
+
+	events := strings.Join([]string{
+		stdoutEvent(t, 1, "stdout", []byte(`{"type":"tool_use","name":"Read"}`+"\n")),
+		stdoutEvent(t, 2, "stderr", []byte("noise\n")),
+		stdoutEvent(t, 3, "stdout", []byte(`{"type":"result"}`+"\n")),
+	}, "\n") + "\n"
+	if err := server.store.Complete(t.Context(), run.ID, protocol.Completion{InstanceID: "worker-a", LeaseToken: run.LeaseToken, State: "succeeded", ExitCode: 0, Events: events}); err != nil {
+		t.Fatal(err)
+	}
+	response := getResponse(t, webServer.URL+"/api/v1/runs/"+run.ID+"/transcript")
+	if response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("Cache-Control = %q", response.Header.Get("Cache-Control"))
+	}
+	var transcript transcriptResponse
+	decodeResponse(t, response, http.StatusOK, &transcript)
+	if want := `{"type":"tool_use","name":"Read"}` + "\n" + `{"type":"result"}` + "\n"; transcript.Stdout != want || transcript.Truncated {
+		t.Fatalf("transcript = %#v", transcript)
+	}
+}
+
+func TestServerServesJobPullRequestDiff(t *testing.T) {
+	server, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+	client := &fakeGitHubTriggerClient{diff: "diff --git a/main.go b/main.go\n+fixed\n"}
+	server.github = client
+	server.repositorySlugs = map[string]string{"machinist": "owainlewis/machinist"}
+
+	missing := getResponse(t, webServer.URL+"/api/v1/jobs/missing/diff")
+	if missing.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing job status = %d", missing.StatusCode)
+	}
+	missing.Body.Close()
+
+	manualJob, err := server.store.CreateJob(t.Context(), "manual", "machinist", "plan", testAgent("plan", "manual"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var noPull map[string]string
+	decodeResponse(t, getResponse(t, webServer.URL+"/api/v1/jobs/"+manualJob+"/diff"), http.StatusNotFound, &noPull)
+	if noPull["error"] != "no pull request" {
+		t.Fatalf("no pull request body = %#v", noPull)
+	}
+
+	clock := server.store.now().UTC()
+	if err := server.store.SyncTriggers(t.Context(), []TriggerDefinition{{Identity: "github/intake", Family: "github", ConfigSignature: "v1"}}); err != nil {
+		t.Fatal(err)
+	}
+	trackedJob, created, err := server.store.CreateTriggeredJob(t.Context(), TriggerAdmission{
+		Identity: "github/intake", Family: "github", ConfigSignature: "v1", ConfigGeneration: mustTriggerGeneration(t, server.store, "github/intake"),
+		OccurrenceKey: "github.com/event/1", Subject: "https://github.com/owainlewis/machinist/issues/396", ScheduledAt: clock,
+		Prompt: "Complete issue", Repository: "machinist", SelectionName: "foreman", Command: testAgent("foreman", "Complete issue"),
+		GitHubRepository: "owainlewis/machinist", GitHubIssueNumber: 396, RequestActor: "owner", RequestLabel: "machinist:requested",
+	})
+	if err != nil || !created {
+		t.Fatalf("triggered job = %q, %v, %v", trackedJob, created, err)
+	}
+	pulls := []PullRequestMirror{
+		{Repository: "machinist", Number: 47, IssueNumber: 396, URL: "https://github.com/owainlewis/machinist/pull/47", HeadRefOID: "old"},
+		{Repository: "machinist", Number: 48, IssueNumber: 396, URL: "https://github.com/owainlewis/machinist/pull/48", HeadRefOID: "0f3ad45"},
+	}
+	if err := server.store.ReplaceRepositoryMirror(t.Context(), "machinist", pulls, nil, clock); err != nil {
+		t.Fatal(err)
+	}
+
+	response := getResponse(t, webServer.URL+"/api/v1/jobs/"+trackedJob+"/diff")
+	if response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("Cache-Control = %q", response.Header.Get("Cache-Control"))
+	}
+	var diff pullRequestDiffResponse
+	decodeResponse(t, response, http.StatusOK, &diff)
+	want := pullRequestDiffResponse{Repository: "owainlewis/machinist", Number: 48, URL: "https://github.com/owainlewis/machinist/pull/48", HeadRefOID: "0f3ad45", Diff: client.diff}
+	if diff != want || len(client.diffCalls) != 1 || client.diffCalls[0] != "owainlewis/machinist#48" {
+		t.Fatalf("diff = %#v, calls = %v", diff, client.diffCalls)
+	}
+
+	line := strings.Repeat("x", 1023) + "\n"
+	client.diff = strings.Repeat(line, maxDiffBytes/len(line)+1)
+	decodeResponse(t, getResponse(t, webServer.URL+"/api/v1/jobs/"+trackedJob+"/diff"), http.StatusOK, &diff)
+	if !diff.Truncated || len(diff.Diff) != maxDiffBytes || !strings.HasSuffix(diff.Diff, "\n") {
+		t.Fatalf("truncated diff = %d bytes, truncated = %v", len(diff.Diff), diff.Truncated)
+	}
+
+	client.diffErr = &GitHubCLIError{Kind: GitHubCLIErrorAuth, Operation: "read pull request diff", Detail: sanitizeGitHubOutput([]byte("bad credentials ghp_secretvalue"))}
+	var failure map[string]string
+	decodeResponse(t, getResponse(t, webServer.URL+"/api/v1/jobs/"+trackedJob+"/diff"), http.StatusBadGateway, &failure)
+	if strings.Contains(failure["error"], "ghp_secretvalue") || !strings.Contains(failure["error"], "authentication") {
+		t.Fatalf("gh failure body = %#v", failure)
+	}
+}
+
+func TestTruncateDiffCutsAfterTheLastWholeLine(t *testing.T) {
+	for name, test := range map[string]struct {
+		diff, want string
+		truncated  bool
+	}{
+		"fits":       {diff: "ab\ncd\n", want: "ab\ncd\n"},
+		"whole line": {diff: "ab\ncd\nef\n", want: "ab\ncd\n", truncated: true},
+		"no newline": {diff: "abcdefghij", want: "abcdefg", truncated: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, truncated := truncateDiff(test.diff, 7)
+			if got != test.want || truncated != test.truncated {
+				t.Fatalf("truncateDiff = %q, %v", got, truncated)
+			}
+		})
+	}
+}
+
+func TestPullRequestSlugFallsBackToTheMirroredURL(t *testing.T) {
+	pull := PullRequestMirror{Repository: "tac-restaurant", URL: "https://github.com/anggel7x/tac/pull/7"}
+	if got := pullRequestSlug(pull, map[string]string{"tac-restaurant": "anggel7x/tac-renamed"}); got != "anggel7x/tac-renamed" {
+		t.Fatalf("registered slug = %q", got)
+	}
+	if got := pullRequestSlug(pull, nil); got != "anggel7x/tac" {
+		t.Fatalf("fallback slug = %q", got)
+	}
+}
+
+func stdoutEvent(t *testing.T, sequence int64, stream string, data []byte) string {
+	t.Helper()
+	encoded, err := json.Marshal(runner.Event{Sequence: sequence, Type: "process.output", Stream: stream, Encoding: "base64", Data: base64.StdEncoding.EncodeToString(data)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}
+
+func getResponse(t *testing.T, endpoint string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func decodeResponse(t *testing.T, response *http.Response, status int, target any) {
+	t.Helper()
+	defer response.Body.Close()
+	if response.StatusCode != status {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status = %d, want %d: %s", response.StatusCode, status, body)
+	}
+	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+		t.Fatal(err)
+	}
 }

@@ -25,6 +25,7 @@ type githubTriggerClient interface {
 	AcknowledgeRequest(context.Context, string, int, string, string, string, bool) error
 	ListPullRequests(context.Context, string, int) ([]PullRequestMirror, error)
 	ListIssues(context.Context, string, int) ([]IssueMirror, error)
+	PullRequestDiff(context.Context, string, int) (string, error)
 }
 
 // mirrorGitHubOutcomes refreshes every registered repository's pull requests

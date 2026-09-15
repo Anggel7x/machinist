@@ -37,6 +37,9 @@ type fakeGitHubTriggerClient struct {
 	replaceCalls       int
 	permissionActor    string
 	permissionActors   []string
+	diff               string
+	diffErr            error
+	diffCalls          []string
 }
 
 func (f *fakeGitHubTriggerClient) SearchRequestedIssues(ctx context.Context, _ []string, label, _ string, limit int) ([]GitHubCandidate, error) {
@@ -82,6 +85,11 @@ func (f *fakeGitHubTriggerClient) ListIssues(_ context.Context, repository strin
 		return nil, f.listErr
 	}
 	return f.issues[repository], nil
+}
+
+func (f *fakeGitHubTriggerClient) PullRequestDiff(_ context.Context, repository string, number int) (string, error) {
+	f.diffCalls = append(f.diffCalls, fmt.Sprintf("%s#%d", repository, number))
+	return f.diff, f.diffErr
 }
 
 func (f *fakeGitHubTriggerClient) IssueDetails(_ context.Context, _ string, number int, _ string) (GitHubIssueDetails, error) {
