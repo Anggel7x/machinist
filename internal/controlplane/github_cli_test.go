@@ -389,14 +389,14 @@ func TestGitHubCLIListPullRequestsRollsUpChecksAndLinksItsIssue(t *testing.T) {
    "headRefName":"machinist/40","headRefOid":"beefbee","baseRefName":"main",
    "additions":3,"deletions":1,"changedFiles":1,"commits":[{"oid":"c"}],
    "closingIssuesReferences":[],"updatedAt":"2026-09-14T09:00:00Z","statusCheckRollup":[]}
-]`})
+]`}, scriptedGitHubResult{stdout: `[]`})
 
 	pulls, err := cli.ListPullRequests(context.Background(), "o/r", 50)
 	if err != nil {
 		t.Fatal(err)
 	}
 	call := runner.calls[0]
-	for _, want := range []string{"pr", "list", "--repo", "o/r", "--state", "all", "closingIssuesReferences", "statusCheckRollup"} {
+	for _, want := range []string{"pr", "list", "--repo", "o/r", "--state", "open", "closingIssuesReferences", "statusCheckRollup"} {
 		if !strings.Contains(strings.Join(call, " "), want) {
 			t.Fatalf("call %v is missing %q", call, want)
 		}
@@ -449,5 +449,38 @@ func TestGitHubCLIListIssuesMirrorsStateAndLabels(t *testing.T) {
 	}
 	if !reflect.DeepEqual(issues[0].Labels, []string{"machinist:queued", "serial"}) {
 		t.Fatalf("labels = %v", issues[0].Labels)
+	}
+}
+
+func TestGitHubCLIListPullRequestsTracksOpenWorkBeyondTheRecentWindow(t *testing.T) {
+	// A repository with more settled pull requests than the window would push
+	// older *open* ones out of a single --state all read, and they would stop
+	// refreshing while still being the thing a job is waiting on. Open work is
+	// therefore read separately from recent history.
+	open := `[{"number":48,"url":"u48","state":"OPEN","updatedAt":"2026-09-15T10:00:00Z","createdAt":"2026-09-01T10:00:00Z","closingIssuesReferences":[{"number":39}],"statusCheckRollup":[]}]`
+	recent := `[
+  {"number":48,"url":"u48","state":"OPEN","updatedAt":"2026-09-15T10:00:00Z","createdAt":"2026-09-01T10:00:00Z","closingIssuesReferences":[{"number":39}],"statusCheckRollup":[]},
+  {"number":90,"url":"u90","state":"MERGED","mergedAt":"2026-09-14T10:00:00Z","createdAt":"2026-09-13T10:00:00Z","closingIssuesReferences":[{"number":80}],"statusCheckRollup":[]}]`
+	cli, runner := newScriptedGitHubCLI(scriptedGitHubResult{stdout: open}, scriptedGitHubResult{stdout: recent})
+
+	pulls, err := cli.ListPullRequests(context.Background(), "o/r", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls = %d, want an open read and a recent read", len(runner.calls))
+	}
+	if states := []string{strings.Join(runner.calls[0], " "), strings.Join(runner.calls[1], " ")}; !strings.Contains(states[0], "--state open") || !strings.Contains(states[1], "--state all") {
+		t.Fatalf("calls = %v", runner.calls)
+	}
+	if len(pulls) != 2 {
+		t.Fatalf("pulls = %d, want 48 and 90 without duplicating 48", len(pulls))
+	}
+	seen := map[int]string{}
+	for _, pull := range pulls {
+		seen[pull.Number] = pull.State
+	}
+	if seen[48] != "open" || seen[90] != "merged" {
+		t.Fatalf("pulls = %v", seen)
 	}
 }

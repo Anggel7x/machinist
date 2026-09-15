@@ -3,7 +3,7 @@ import { Bot, Clock3, Hash, Server, Terminal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { PageHeading, QuietState } from "@/components/ui/page-heading";
-import { groupWorkersByHost } from "@/worker-fleet";
+import { groupWorkersByHost } from "@/worker-pool";
 
 // Workers are grouped by the host that runs them: the host is the unit you
 // operate on, the worker is the unit that holds a lease, and the page would

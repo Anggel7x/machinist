@@ -62,6 +62,7 @@ type PullRequestMirror struct {
 	ChecksFailed     int       `json:"checks_failed"`
 	ChecksPending    int       `json:"checks_pending"`
 	IssueNumber      int       `json:"issue_number"`
+	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
 	FetchedAt        time.Time `json:"fetched_at"`
 }
@@ -84,9 +85,11 @@ type IssueMirror struct {
 // flat timer: a failed check or a refused merge is a problem now, while a green
 // pull request is only a problem once it has been ignored for the grace period.
 //
-// Staleness is measured from the pull request's own UpdatedAt, which moves when
-// checks complete, so the grace period starts from the last real change rather
-// than from when the run finished.
+// Staleness is measured from when the pull request was opened, not from its
+// UpdatedAt: a comment or a check run moves UpdatedAt, so a busy pull request
+// would reset its own grace period indefinitely and never be flagged. Age since
+// opening cannot be reset by activity, and a pull request open for hours that
+// has only just gone green has genuinely been unlanded for hours.
 func DeriveOutcome(pull *PullRequestMirror, now time.Time, grace time.Duration) (string, bool) {
 	if pull == nil {
 		return OutcomeNone, false
@@ -110,5 +113,5 @@ func DeriveOutcome(pull *PullRequestMirror, now time.Time, grace time.Duration) 
 }
 
 func (p PullRequestMirror) stale(now time.Time, grace time.Duration) bool {
-	return !p.UpdatedAt.IsZero() && now.Sub(p.UpdatedAt) > grace
+	return !p.CreatedAt.IsZero() && now.Sub(p.CreatedAt) > grace
 }

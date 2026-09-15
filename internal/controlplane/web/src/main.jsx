@@ -337,7 +337,7 @@ function Outcome({ job }) {
   const tone = summary.flagged ? "border-foreground bg-foreground text-background" : summary.landed ? "border-border text-muted-foreground" : "border-dashed border-foreground/35 text-muted-foreground";
   const Icon = summary.landed ? GitMerge : GitPullRequest;
   return <div className="mt-2 flex min-w-0 items-center gap-2 border-t border-border pt-2">
-    <Badge className={cn("gap-1.5", tone)}><Icon className="size-3 shrink-0" />{summary.label}</Badge>
+    <Badge className={cn("gap-1.5", tone)}><Icon className="size-3 shrink-0" />{summary.signal}</Badge>
     {summary.pullRequest && <span className="truncate font-mono text-xs text-muted-foreground">#{summary.pullRequest.number}</span>}
   </div>;
 }

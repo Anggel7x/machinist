@@ -5,6 +5,7 @@ import "encoding/json"
 type PollRequest struct {
 	InstanceID   string              `json:"instance_id"`
 	Name         string              `json:"name"`
+	Host         string              `json:"host,omitempty"`
 	Executors    []string            `json:"executors"`
 	Repositories []string            `json:"repositories"`
 	Models       map[string][]string `json:"models,omitempty"`

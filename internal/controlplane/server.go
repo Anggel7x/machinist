@@ -134,8 +134,8 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 
 func (s *Server) Handler() http.Handler { return s.handler }
 
-// dispatchLimits is the policy a poll is judged against: the fleet-wide job
-// limit plus each repository's declared ceiling.
+// dispatchLimits is the policy a poll is judged against: the control plane's
+// own job limit plus each repository's declared ceiling.
 func (s *Server) dispatchLimits() dispatchLimits {
 	return dispatchLimits{MaxConcurrentJobs: s.maxConcurrentJobs, RepositoryCeilings: s.repositoryCeiling}
 }

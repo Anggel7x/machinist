@@ -640,7 +640,7 @@ func decodeSingleJSON(output []byte, target any) error {
 // repository resolves issues to pull requests without a call per job.
 const pullRequestFields = "number,url,title,state,isDraft,mergeable,mergeStateStatus,reviewDecision,mergedAt," +
 	"headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,commits,closingIssuesReferences," +
-	"statusCheckRollup,updatedAt"
+	"statusCheckRollup,createdAt,updatedAt"
 
 const issueFields = "number,url,state,labels,updatedAt"
 
@@ -660,6 +660,7 @@ type githubPullRequestPayload struct {
 	Additions        int    `json:"additions"`
 	Deletions        int    `json:"deletions"`
 	ChangedFiles     int    `json:"changedFiles"`
+	CreatedAt        string `json:"createdAt"`
 	UpdatedAt        string `json:"updatedAt"`
 	Commits          []struct {
 		OID string `json:"oid"`
@@ -695,20 +696,31 @@ func (g *GitHubCLI) ListPullRequests(ctx context.Context, repository string, lim
 	if limit <= 0 || limit > maxGitHubCandidates {
 		limit = maxGitHubCandidates
 	}
-	args := []string{"pr", "list", "--repo", repository, "--state", "all", "--limit", strconv.Itoa(limit), "--json", pullRequestFields}
-	stdout, err := g.run(ctx, "list pull requests", args)
-	if err != nil {
-		return nil, err
-	}
+	// Two reads, because one bounded read cannot do both jobs. "open" is
+	// everything whose outcome can still change, and must be tracked however
+	// old it is; "all" is the recent window, which is how a pull request's
+	// transition to merged or closed is noticed. Terminal rows are then sticky,
+	// since the mirror upserts and never deletes.
 	var payload []githubPullRequestPayload
-	if err := json.Unmarshal(stdout, &payload); err != nil {
-		return nil, malformedGitHubOutput("list pull requests", err, stdout)
+	for _, state := range []string{"open", "all"} {
+		args := []string{"pr", "list", "--repo", repository, "--state", state, "--limit", strconv.Itoa(limit), "--json", pullRequestFields}
+		stdout, err := g.run(ctx, "list pull requests", args)
+		if err != nil {
+			return nil, err
+		}
+		var page []githubPullRequestPayload
+		if err := json.Unmarshal(stdout, &page); err != nil {
+			return nil, malformedGitHubOutput("list pull requests", err, stdout)
+		}
+		payload = append(payload, page...)
 	}
 	mirrors := make([]PullRequestMirror, 0, len(payload))
+	seen := make(map[int]bool, len(payload))
 	for _, entry := range payload {
-		if entry.Number <= 0 {
+		if entry.Number <= 0 || seen[entry.Number] {
 			continue
 		}
+		seen[entry.Number] = true
 		mirror := PullRequestMirror{
 			Repository:       repository,
 			Number:           entry.Number,
@@ -727,6 +739,7 @@ func (g *GitHubCLI) ListPullRequests(ctx context.Context, repository string, lim
 			Deletions:        entry.Deletions,
 			ChangedFiles:     entry.ChangedFiles,
 			Commits:          len(entry.Commits),
+			CreatedAt:        parseGitHubTime(entry.CreatedAt),
 			UpdatedAt:        parseGitHubTime(entry.UpdatedAt),
 		}
 		for _, check := range entry.StatusCheckRollup {

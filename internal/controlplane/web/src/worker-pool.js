@@ -14,7 +14,10 @@ export function hostFromWorkerName(name) {
 export function groupWorkersByHost(workers) {
   const hosts = new Map();
   for (const worker of workers) {
-    const host = hostFromWorkerName(worker.name);
+    // The worker reports its host; the name is only a fallback for workers
+    // that predate that, since "<host>-<n>" cannot be told apart from a host
+    // whose own name ends in a number.
+    const host = String(worker.host || "").trim() || hostFromWorkerName(worker.name);
     if (!hosts.has(host)) hosts.set(host, { host, workers: [], connected: 0, total: 0, repositories: new Set() });
     const entry = hosts.get(host);
     entry.workers.push(worker);

@@ -34,6 +34,9 @@ func prepareWorkerWorktree(ctx context.Context, checkout, dataDirectory, worker,
 	}
 	worktree := filepath.Join(dataDirectory, "worktrees", sanitizePathSegment(worker), sanitizePathSegment(repository))
 	if isGitWorktree(ctx, worktree) {
+		if err := resetWorkerWorktree(ctx, checkout, worktree); err != nil {
+			return "", err
+		}
 		return worktree, nil
 	}
 	if entries, err := os.ReadDir(worktree); err == nil && len(entries) > 0 {
@@ -50,6 +53,28 @@ func prepareWorkerWorktree(ctx context.Context, checkout, dataDirectory, worker,
 		return "", fmt.Errorf("create worker worktree %q: %w: %s", worktree, err, output)
 	}
 	return worktree, nil
+}
+
+// resetWorkerWorktree returns a reused worktree to the checkout's current head
+// and removes whatever the last run left behind. Without this, run N+1 starts
+// on run N's commits and dirty files — the worktree is a starting point for
+// work, not a place work is kept, and agents create their own worktrees for
+// anything they intend to keep.
+//
+// Ignored files survive, so dependency and build caches are not thrown away on
+// every run.
+func resetWorkerWorktree(ctx context.Context, checkout, worktree string) error {
+	head, err := runGitCommand(ctx, checkout, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("read checkout head for %q: %w: %s", worktree, err, head)
+	}
+	if output, err := runGitCommand(ctx, worktree, "reset", "--hard", head); err != nil {
+		return fmt.Errorf("reset worker worktree %q: %w: %s", worktree, err, output)
+	}
+	if output, err := runGitCommand(ctx, worktree, "clean", "-fd"); err != nil {
+		return fmt.Errorf("clean worker worktree %q: %w: %s", worktree, err, output)
+	}
+	return nil
 }
 
 func isGitWorktree(ctx context.Context, directory string) bool {

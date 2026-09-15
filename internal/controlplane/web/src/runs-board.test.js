@@ -58,3 +58,15 @@ test("outcome summarises what the work did, not what the process did", () => {
   assert.equal(outcomeSummary({ state: "running", outcome: "none" }).label, "No pull request");
   assert.equal(outcomeSummary({ state: "succeeded" }).label, "No pull request");
 });
+
+test("the card's single signal answers only whether the work landed", () => {
+  // The card is a triage surface: CI detail belongs in the task view, so the
+  // signal is binary however much the panel has to say about the reason.
+  assert.equal(outcomeSummary({ outcome: "landed" }).signal, "Landed");
+  for (const outcome of ["unlanded", "blocked", "failing", "waiting", "draft", "abandoned"]) {
+    assert.equal(outcomeSummary({ outcome }).signal, "Not landed");
+  }
+  assert.equal(outcomeSummary({ outcome: "none" }).signal, "");
+  // The panel keeps the reason.
+  assert.equal(outcomeSummary({ outcome: "failing" }).label, "Checks failing");
+});

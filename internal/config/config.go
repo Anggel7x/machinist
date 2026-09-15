@@ -33,13 +33,17 @@ const (
 )
 
 type Worker struct {
-	Name          string                `toml:"name"`
-	DataDirectory string                `toml:"data_directory"`
-	MaxWorkers    *int                  `toml:"max_workers"`
-	ControlPlane  ControlPlane          `toml:"control_plane"`
-	Executors     map[string]Executor   `toml:"executors"`
-	Repositories  map[string]Repository `toml:"repositories"`
-	configDir     string
+	Name          string `toml:"name"`
+	DataDirectory string `toml:"data_directory"`
+	MaxWorkers    *int   `toml:"max_workers"`
+	// Host is the machine's identity in the pool, kept when a pooled worker
+	// takes a name of its own so the dashboard can group by machine without
+	// guessing at name shapes.
+	Host         string                `toml:"-"`
+	ControlPlane ControlPlane          `toml:"control_plane"`
+	Executors    map[string]Executor   `toml:"executors"`
+	Repositories map[string]Repository `toml:"repositories"`
+	configDir    string
 }
 
 // PoolSize is how many workers this host is willing to run at once. It is a
@@ -128,7 +132,7 @@ func (c Config) RepositorySlugs() (map[string]string, error) {
 
 // RepositoryCeilings resolves the declared per-repository parallelism. A
 // repository with no ceiling is absent from the result and therefore unlimited
-// beyond the fleet-wide max_concurrent_jobs.
+// beyond the control plane's max_concurrent_jobs.
 func (c Config) RepositoryCeilings() (map[string]int, error) {
 	ceilings := make(map[string]int, len(c.Repositories))
 	for _, name := range sortedMapKeys(c.Repositories) {
@@ -546,6 +550,9 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 		if worker.Name == "" {
 			return Worker{}, errors.New("find machine hostname: hostname is empty")
 		}
+	}
+	if strings.TrimSpace(worker.Host) == "" {
+		worker.Host = worker.Name
 	}
 	if worker.DataDirectory == "" {
 		home, err := os.UserHomeDir()

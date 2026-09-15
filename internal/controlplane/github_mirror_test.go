@@ -37,15 +37,21 @@ func TestDeriveOutcomeClassifiesWorkAndFlagsOnlyWhatNeedsAttention(t *testing.T)
 			wantOutcome: OutcomeWaiting,
 		},
 		"green and unmerged inside the grace period": {
-			pull:        &PullRequestMirror{State: "open", ChecksState: ChecksPassing, UpdatedAt: fresh},
+			pull:        &PullRequestMirror{State: "open", ChecksState: ChecksPassing, CreatedAt: fresh, UpdatedAt: fresh},
 			wantOutcome: OutcomeUnlanded,
 		},
 		"green and unmerged past the grace period": {
-			pull:        &PullRequestMirror{State: "open", ChecksState: ChecksPassing, UpdatedAt: stale},
+			pull:        &PullRequestMirror{State: "open", ChecksState: ChecksPassing, CreatedAt: stale, UpdatedAt: stale},
+			wantOutcome: OutcomeUnlanded, wantFlagged: true,
+		},
+		// Comments and check runs move UpdatedAt, so a busy pull request would
+		// never age out of the grace period if staleness were measured from it.
+		"green and unmerged but still being commented on": {
+			pull:        &PullRequestMirror{State: "open", ChecksState: ChecksPassing, CreatedAt: stale, UpdatedAt: now.Add(-time.Minute)},
 			wantOutcome: OutcomeUnlanded, wantFlagged: true,
 		},
 		"draft past the grace period": {
-			pull:        &PullRequestMirror{State: "open", IsDraft: true, ChecksState: ChecksPassing, UpdatedAt: stale},
+			pull:        &PullRequestMirror{State: "open", IsDraft: true, ChecksState: ChecksPassing, CreatedAt: stale, UpdatedAt: stale},
 			wantOutcome: OutcomeDraft, wantFlagged: true,
 		},
 	} {

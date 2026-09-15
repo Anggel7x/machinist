@@ -1284,3 +1284,21 @@ func TestSnapshotReportsOutcomeFromMirroredGitHubState(t *testing.T) {
 		t.Fatalf("untracked job = %#v", untracked)
 	}
 }
+
+func TestPollRecordsTheHostRunningEachWorker(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	request := pollRequest("worker-a", []string{"codex"}, []string{"machinist"})
+	request.Name = "build-2-1"
+	request.Host = "build-2"
+
+	if _, err := store.Poll(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Workers) != 1 || snapshot.Workers[0].Host != "build-2" {
+		t.Fatalf("workers = %#v, want the reported host", snapshot.Workers)
+	}
+}

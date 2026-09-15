@@ -137,3 +137,52 @@ func TestGitHubCloneURLBuildsAnHTTPSRemote(t *testing.T) {
 		t.Fatalf("empty slug url = %q", got)
 	}
 }
+
+func TestWorkerWorktreeIsResetToTheCheckoutHeadOnReuse(t *testing.T) {
+	checkout := initTestRepository(t)
+	root := t.TempDir()
+
+	first, err := prepareWorkerWorktree(t.Context(), checkout, root, "host-1", "machinist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The previous run left work behind: a commit of its own, an uncommitted
+	// edit, and an untracked file.
+	if err := os.WriteFile(filepath.Join(first, "leftover.txt"), []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, first, "add", "leftover.txt")
+	mustGit(t, first, "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-m", "previous run")
+	if err := os.WriteFile(filepath.Join(first, "README.md"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(first, "untracked.txt"), []byte("junk\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Meanwhile the checkout has moved on.
+	if err := os.WriteFile(filepath.Join(checkout, "NEW.md"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, checkout, "add", "NEW.md")
+	mustGit(t, checkout, "commit", "-m", "second")
+
+	reused, err := prepareWorkerWorktree(t.Context(), checkout, root, "host-1", "machinist")
+	if err != nil || reused != first {
+		t.Fatalf("reused = %q, %v, want %q", reused, err, first)
+	}
+	if head := mustGit(t, reused, "rev-parse", "HEAD"); head != mustGit(t, checkout, "rev-parse", "HEAD") {
+		t.Fatalf("reused worktree head = %q, want the checkout head", head)
+	}
+	if status := mustGit(t, reused, "status", "--porcelain"); status != "" {
+		t.Fatalf("reused worktree is not clean: %q", status)
+	}
+	if _, err := os.Stat(filepath.Join(reused, "leftover.txt")); err == nil {
+		t.Fatal("the previous run's commit is still checked out")
+	}
+	if _, err := os.Stat(filepath.Join(reused, "untracked.txt")); err == nil {
+		t.Fatal("the previous run's untracked file survived")
+	}
+	if _, err := os.Stat(filepath.Join(reused, "NEW.md")); err != nil {
+		t.Fatalf("the worktree did not pick up the checkout's new commit: %v", err)
+	}
+}

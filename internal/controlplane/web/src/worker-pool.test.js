@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupWorkersByHost, hostFromWorkerName } from "./worker-fleet.js";
+import { groupWorkersByHost, hostFromWorkerName } from "./worker-pool.js";
 
 test("a pooled worker name resolves to the host that runs it", () => {
   assert.equal(hostFromWorkerName("machinist-vm-1"), "machinist-vm");
@@ -24,4 +24,20 @@ test("hosts group their workers and report how much capacity is live", () => {
   assert.equal(vm.connected, 1);
   assert.deepEqual(vm.workers.map(({ name }) => name), ["vm-1", "vm-2"]);
   assert.deepEqual(vm.repositories, ["machinist", "tac"]);
+});
+
+test("a reported host wins over guessing from the worker name", () => {
+  // Deriving the host from "<host>-<n>" mis-groups a machine whose own name
+  // ends in a number, so the worker reports its host and the name is only a
+  // fallback for workers that predate that.
+  // An unpooled worker on a host called "build-2" is named "build-2", which
+  // the name heuristic would file under "build".
+  const hosts = groupWorkersByHost([
+    { instance_id: "a", name: "build-2", host: "build-2", connected: true },
+    { instance_id: "b", name: "legacy-1", connected: false },
+  ]);
+
+  assert.deepEqual(hosts.map(({ host }) => host), ["build-2", "legacy"]);
+  assert.equal(hosts[0].total, 1);
+  assert.equal(hosts[1].total, 1);
 });

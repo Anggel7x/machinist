@@ -28,10 +28,13 @@ const outcomeLabels = {
 
 export function outcomeSummary(job) {
   const outcome = job.outcome || "none";
+  const landed = outcome === "landed";
   return {
     outcome,
     label: outcomeLabels[outcome] || outcomeLabels.none,
-    landed: outcome === "landed",
+    // The card gets one binary signal; the reason is the task view's job.
+    signal: outcome === "none" ? "" : landed ? outcomeLabels.landed : outcomeLabels.unlanded,
+    landed,
     flagged: Boolean(job.outcome_flagged),
     pullRequest: job.pull_request || null,
     issue: job.issue || null,

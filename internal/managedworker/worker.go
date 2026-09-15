@@ -130,6 +130,7 @@ func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
 	request := protocol.PollRequest{
 		InstanceID:   w.instanceID,
 		Name:         w.config.Name,
+		Host:         w.config.Host,
 		Executors:    w.config.ExecutorNames(),
 		Repositories: w.config.RepositoryNames(),
 		Models:       w.config.ModelCapabilities(),

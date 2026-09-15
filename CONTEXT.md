@@ -64,8 +64,9 @@ _Avoid_: Node, box, runner
 
 **Ceiling**:
 The maximum number of runs one repository may have in flight at once, across
-every host. A policy about a codebase, not about a machine.
-_Avoid_: Limit, cap, concurrency
+every host. A policy about a codebase, not about a machine; declared as that
+repository's `parallel`.
+_Avoid_: Limit, cap, concurrency, parallelism
 
 **Executor**:
 The coding-agent program a run is carried out by, such as Claude Code or Codex.

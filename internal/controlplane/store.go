@@ -81,6 +81,7 @@ type Run struct {
 type Worker struct {
 	InstanceID   string    `json:"instance_id"`
 	Name         string    `json:"name"`
+	Host         string    `json:"host,omitempty"`
 	LastSeenAt   time.Time `json:"last_seen_at"`
 	Repositories []string  `json:"repositories"`
 	Connected    bool      `json:"connected"`
@@ -216,7 +217,7 @@ CREATE TABLE IF NOT EXISTS runs (
  lease_token TEXT, lease_expires_at INTEGER, exit_code INTEGER, error TEXT, result TEXT, events TEXT,
  started_at TEXT, completed_at TEXT, duration_millis INTEGER, token_usage INTEGER);
 CREATE INDEX IF NOT EXISTS runs_dispatch ON runs(state, job_id);
-CREATE TABLE IF NOT EXISTS workers (instance_id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS workers (instance_id TEXT PRIMARY KEY, name TEXT NOT NULL, host TEXT NOT NULL DEFAULT '', last_seen_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS worker_repositories (worker_instance TEXT NOT NULL REFERENCES workers(instance_id) ON DELETE CASCADE, repository TEXT NOT NULL, PRIMARY KEY(worker_instance,repository));
 CREATE TABLE IF NOT EXISTS known_repositories (repository TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS trigger_state (identity TEXT PRIMARY KEY,family TEXT NOT NULL,config_signature TEXT NOT NULL,generation_id TEXT NOT NULL,next_due_at TEXT,pending_occurrence_at TEXT,last_attempt_at TEXT,last_success_at TEXT,last_job_state TEXT NOT NULL DEFAULT '',last_job_error TEXT NOT NULL DEFAULT '',health TEXT NOT NULL DEFAULT 'healthy',latest_error TEXT NOT NULL DEFAULT '',candidate_count INTEGER NOT NULL DEFAULT 0,admission_count INTEGER NOT NULL DEFAULT 0,coalesced_count INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL);
@@ -232,7 +233,8 @@ CREATE TABLE IF NOT EXISTS github_pull_requests (
  head_ref_oid TEXT NOT NULL DEFAULT '', base_ref_name TEXT NOT NULL DEFAULT '', additions INTEGER NOT NULL DEFAULT 0,
  deletions INTEGER NOT NULL DEFAULT 0, changed_files INTEGER NOT NULL DEFAULT 0, commits INTEGER NOT NULL DEFAULT 0,
  checks_state TEXT NOT NULL DEFAULT 'none', checks_passed INTEGER NOT NULL DEFAULT 0, checks_failed INTEGER NOT NULL DEFAULT 0,
- checks_pending INTEGER NOT NULL DEFAULT 0, issue_number INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '',
+ checks_pending INTEGER NOT NULL DEFAULT 0, issue_number INTEGER NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '',
  fetched_at TEXT NOT NULL, PRIMARY KEY(repository,number));
 CREATE INDEX IF NOT EXISTS github_pull_requests_issue ON github_pull_requests(repository,issue_number);
 CREATE TABLE IF NOT EXISTS github_issues (
@@ -731,7 +733,7 @@ func (s *Store) AddTriggerCoalesced(ctx context.Context, identity, configGenerat
 }
 
 // dispatchLimits is everything that can stop a queued run being leased.
-// MaxConcurrentJobs caps the whole fleet; RepositoryCeilings caps one
+// MaxConcurrentJobs caps every repository at once; RepositoryCeilings caps one
 // repository. Both are control-plane policy: a worker cannot route around
 // either, however many of them a host runs.
 type dispatchLimits struct {
@@ -779,7 +781,7 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, limits d
 	defer tx.Rollback()
 	nowTime := s.now().UTC()
 	now := nowTime.Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO workers(instance_id,name,last_seen_at) VALUES(?,?,?) ON CONFLICT(instance_id) DO UPDATE SET name=excluded.name,last_seen_at=excluded.last_seen_at`, request.InstanceID, request.Name, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO workers(instance_id,name,host,last_seen_at) VALUES(?,?,?,?) ON CONFLICT(instance_id) DO UPDATE SET name=excluded.name,host=excluded.host,last_seen_at=excluded.last_seen_at`, request.InstanceID, request.Name, request.Host, now); err != nil {
 		return nil, fmt.Errorf("update worker: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, reclaimExpiredLeasesSQL, nowTime.UnixNano()); err != nil {
@@ -1103,22 +1105,23 @@ func (s *Store) readGitHubMirror(ctx context.Context) (map[mirrorKey]PullRequest
 	pulls := map[mirrorKey]PullRequestMirror{}
 	rows, err := s.db.QueryContext(ctx, `SELECT repository,number,url,title,state,is_draft,mergeable,merge_state_status,review_decision,merged_at,
 head_ref_name,head_ref_oid,base_ref_name,additions,deletions,changed_files,commits,
-checks_state,checks_passed,checks_failed,checks_pending,issue_number,updated_at,fetched_at
+checks_state,checks_passed,checks_failed,checks_pending,issue_number,created_at,updated_at,fetched_at
 FROM github_pull_requests WHERE issue_number>0 ORDER BY number`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read mirrored pull requests: %w", err)
 	}
 	for rows.Next() {
 		var pull PullRequestMirror
-		var mergedAt, updatedAt, fetchedAt string
+		var mergedAt, createdAt, updatedAt, fetchedAt string
 		if err := rows.Scan(&pull.Repository, &pull.Number, &pull.URL, &pull.Title, &pull.State, &pull.IsDraft, &pull.Mergeable,
 			&pull.MergeStateStatus, &pull.ReviewDecision, &mergedAt, &pull.HeadRefName, &pull.HeadRefOID, &pull.BaseRefName,
 			&pull.Additions, &pull.Deletions, &pull.ChangedFiles, &pull.Commits,
-			&pull.ChecksState, &pull.ChecksPassed, &pull.ChecksFailed, &pull.ChecksPending, &pull.IssueNumber, &updatedAt, &fetchedAt); err != nil {
+			&pull.ChecksState, &pull.ChecksPassed, &pull.ChecksFailed, &pull.ChecksPending, &pull.IssueNumber, &createdAt, &updatedAt, &fetchedAt); err != nil {
 			rows.Close()
 			return nil, nil, err
 		}
 		pull.MergedAt = parseStoredTime(mergedAt)
+		pull.CreatedAt = parseStoredTime(createdAt)
 		pull.UpdatedAt = parseStoredTime(updatedAt)
 		pull.FetchedAt = parseStoredTime(fetchedAt)
 		key := mirrorKey{repository: pull.Repository, number: pull.IssueNumber}
@@ -1171,21 +1174,21 @@ func (s *Store) ReplaceRepositoryMirror(ctx context.Context, repository string, 
 		if _, err := tx.ExecContext(ctx, `INSERT INTO github_pull_requests
 (repository,number,url,title,state,is_draft,mergeable,merge_state_status,review_decision,merged_at,
 head_ref_name,head_ref_oid,base_ref_name,additions,deletions,changed_files,commits,
-checks_state,checks_passed,checks_failed,checks_pending,issue_number,updated_at,fetched_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+checks_state,checks_passed,checks_failed,checks_pending,issue_number,created_at,updated_at,fetched_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(repository,number) DO UPDATE SET url=excluded.url,title=excluded.title,state=excluded.state,
 is_draft=excluded.is_draft,mergeable=excluded.mergeable,merge_state_status=excluded.merge_state_status,
 review_decision=excluded.review_decision,merged_at=excluded.merged_at,head_ref_name=excluded.head_ref_name,
 head_ref_oid=excluded.head_ref_oid,base_ref_name=excluded.base_ref_name,additions=excluded.additions,
 deletions=excluded.deletions,changed_files=excluded.changed_files,commits=excluded.commits,
 checks_state=excluded.checks_state,checks_passed=excluded.checks_passed,checks_failed=excluded.checks_failed,
-checks_pending=excluded.checks_pending,issue_number=excluded.issue_number,updated_at=excluded.updated_at,
+checks_pending=excluded.checks_pending,issue_number=excluded.issue_number,created_at=excluded.created_at,updated_at=excluded.updated_at,
 fetched_at=excluded.fetched_at`,
 			repository, pull.Number, pull.URL, pull.Title, pull.State, pull.IsDraft, pull.Mergeable,
 			pull.MergeStateStatus, pull.ReviewDecision, formatStoredTime(pull.MergedAt),
 			pull.HeadRefName, pull.HeadRefOID, pull.BaseRefName, pull.Additions, pull.Deletions, pull.ChangedFiles, pull.Commits,
 			pull.ChecksState, pull.ChecksPassed, pull.ChecksFailed, pull.ChecksPending, pull.IssueNumber,
-			formatStoredTime(pull.UpdatedAt), stamp); err != nil {
+			formatStoredTime(pull.CreatedAt), formatStoredTime(pull.UpdatedAt), stamp); err != nil {
 			return fmt.Errorf("mirror pull request %s#%d: %w", repository, pull.Number, err)
 		}
 	}
@@ -1361,7 +1364,7 @@ func elapsedMillis(startedAt, completedAt string) *int64 {
 }
 
 func (s *Store) listWorkers(ctx context.Context) ([]Worker, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT instance_id,name,last_seen_at FROM workers ORDER BY name,instance_id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT instance_id,name,host,last_seen_at FROM workers ORDER BY name,instance_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1369,7 +1372,7 @@ func (s *Store) listWorkers(ctx context.Context) ([]Worker, error) {
 	for rows.Next() {
 		worker := Worker{Repositories: []string{}}
 		var lastSeen string
-		if err := rows.Scan(&worker.InstanceID, &worker.Name, &lastSeen); err != nil {
+		if err := rows.Scan(&worker.InstanceID, &worker.Name, &worker.Host, &lastSeen); err != nil {
 			rows.Close()
 			return nil, err
 		}
