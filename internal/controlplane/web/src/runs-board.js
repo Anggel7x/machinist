@@ -13,8 +13,38 @@ export function boardColumnForState(state) {
   return "finished";
 }
 
-export function needsAttention(state) {
-  return !activeStates.has(state) && state !== "succeeded";
+// Outcome is what the work did; state is what the process did. A job can have
+// a perfect state and no outcome at all.
+const outcomeLabels = {
+  landed: "Landed",
+  unlanded: "Not landed",
+  blocked: "Blocked",
+  failing: "Checks failing",
+  waiting: "Checks running",
+  draft: "Draft",
+  abandoned: "Closed unmerged",
+  none: "No pull request",
+};
+
+export function outcomeSummary(job) {
+  const outcome = job.outcome || "none";
+  return {
+    outcome,
+    label: outcomeLabels[outcome] || outcomeLabels.none,
+    landed: outcome === "landed",
+    flagged: Boolean(job.outcome_flagged),
+    pullRequest: job.pull_request || null,
+    issue: job.issue || null,
+  };
+}
+
+// A finished run whose pull request never landed is the case the board used to
+// hide: terminal, successful, and not done. Only terminal jobs are judged on
+// outcome, since work in flight has not had its chance yet.
+export function needsAttention(job) {
+  if (activeStates.has(job.state)) return false;
+  if (job.state !== "succeeded") return true;
+  return Boolean(job.outcome_flagged);
 }
 
 export function filterJobs(jobs, filter) {

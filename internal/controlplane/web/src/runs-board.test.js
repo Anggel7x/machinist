@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boardColumnForState, filterJobs, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, needsAttention } from "./runs-board.js";
+import { boardColumnForState, filterJobs, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, needsAttention, outcomeSummary } from "./runs-board.js";
 
 test("job states map to the three board columns without hiding attention states", () => {
   assert.equal(boardColumnForState("queued"), "queued");
@@ -9,7 +9,7 @@ test("job states map to the three board columns without hiding attention states"
 
   for (const state of ["failed", "timed_out", "cancelled", "unexpected_state"]) {
     assert.equal(boardColumnForState(state), "finished");
-    assert.equal(needsAttention(state), true);
+    assert.equal(needsAttention({ state }), true);
   }
 
   const jobs = ["queued", "running", "succeeded", "failed", "timed_out", "cancelled", "unexpected_state"]
@@ -39,4 +39,22 @@ test("GitHub issue titles are preferred over prompts and hashes", () => {
   assert.equal(jobDisplayTitle(job), "Make cards readable");
   assert.equal(githubIssueReference(job), "#7");
   assert.equal(jobDisplayTitle({ id: "job_12345678", prompt: "Run an audit" }), "Run an audit");
+});
+
+test("a succeeded run whose work never landed still needs attention", () => {
+  // The board answered "did the run finish?" and never "did the work land?".
+  assert.equal(needsAttention({ state: "succeeded", outcome: "landed" }), false);
+  assert.equal(needsAttention({ state: "succeeded", outcome: "waiting" }), false);
+  assert.equal(needsAttention({ state: "succeeded", outcome: "unlanded", outcome_flagged: false }), false);
+  assert.equal(needsAttention({ state: "succeeded", outcome: "unlanded", outcome_flagged: true }), true);
+  assert.equal(needsAttention({ state: "succeeded", outcome: "blocked", outcome_flagged: true }), true);
+  assert.equal(needsAttention({ state: "running", outcome: "failing", outcome_flagged: true }), false);
+});
+
+test("outcome summarises what the work did, not what the process did", () => {
+  assert.equal(outcomeSummary({ state: "succeeded", outcome: "landed" }).label, "Landed");
+  assert.equal(outcomeSummary({ state: "succeeded", outcome: "landed" }).landed, true);
+  assert.equal(outcomeSummary({ state: "succeeded", outcome: "blocked" }).landed, false);
+  assert.equal(outcomeSummary({ state: "running", outcome: "none" }).label, "No pull request");
+  assert.equal(outcomeSummary({ state: "succeeded" }).label, "No pull request");
 });

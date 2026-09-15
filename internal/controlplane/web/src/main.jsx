@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource-variable/manrope";
 import "@fontsource-variable/newsreader";
-import { Activity, ArrowLeft, BarChart3, Bot, GitBranch, LayoutDashboard, Moon, Play, Plus, Server, Sun, Table2, TimerReset, Trash2, X } from "lucide-react";
+import { Activity, ArrowLeft, BarChart3, Bot, ExternalLink, GitBranch, GitCommit, GitMerge, GitPullRequest, LayoutDashboard, Moon, Play, Plus, Server, Sun, Table2, Tag, TimerReset, Trash2, X } from "lucide-react";
 import { Analytics } from "@/analytics";
 import { CommandsPage, WorkersPage } from "@/catalog";
 import { Badge } from "@/components/ui/badge";
@@ -12,7 +12,7 @@ import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { formatDurationMillis, formatTaskTokenUsage, formatTokenUsage, runModelSummary, taskDurationMillis, tokenUsageSummary } from "@/run-metrics";
 import { routeFromHash } from "@/routes";
-import { boardColumns, currentRun, filterJobs, githubIssueReference, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, needsAttention } from "@/runs-board";
+import { boardColumns, currentRun, filterJobs, githubIssueReference, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, needsAttention, outcomeSummary } from "@/runs-board";
 import { createStatusLoader } from "@/status-loader";
 import { TriggersPage } from "@/triggers";
 import "./styles.css";
@@ -238,6 +238,8 @@ function TaskDetail({ job, loaded, error, deleting, onDelete }) {
       <DetailMetric label="Updated" value={formatTimestamp(job.updated_at)} />
     </dl>
 
+    <WorkPanel job={job} />
+
     <section aria-labelledby="task-prompt">
       <h2 id="task-prompt" className="text-sm font-semibold">Prompt</h2>
       <pre className="mt-3 whitespace-pre-wrap break-words border-l-2 border-border pl-4 font-sans text-sm leading-6">{job.prompt}</pre>
@@ -293,7 +295,7 @@ function RunBoard({ jobs }) {
 
 function RunCard({ job }) {
   const run = currentRun(job);
-  const attention = needsAttention(job.state);
+  const attention = needsAttention(job);
   const title = jobDisplayTitle(job);
   const reference = githubIssueReference(job);
   return <Card className={cn("min-w-0 overflow-hidden", attention && "border-foreground/30 shadow-[inset_3px_0_0_0_var(--foreground)]")}>
@@ -302,6 +304,7 @@ function RunCard({ job }) {
       <p className="mt-1 truncate font-mono text-xs text-muted-foreground" title={job.id}>{reference ? `${reference} · ` : ""}{shortId(job.id)}</p>
       <div className="mt-2 flex min-w-0 items-center gap-2 text-xs text-muted-foreground"><span className="truncate font-mono">{job.repository}</span><span>·</span><Bot className="size-3.5 shrink-0" /><span className="truncate">{job.command}</span></div>
       <div className="mt-1.5 flex min-w-0 items-center justify-between gap-3 text-xs text-muted-foreground"><span className="flex min-w-0 items-center gap-1.5"><Server className="size-3.5 shrink-0" /><span className="truncate">{run?.worker_name || "Unassigned"}</span></span><time className="shrink-0" dateTime={job.created_at}>{relativeTime(job.created_at)}</time></div>
+      <Outcome job={job} />
     </a>
   </Card>;
 }
@@ -323,6 +326,65 @@ function RunRow({ job }) {
       <div className="text-xs text-muted-foreground"><p className="font-medium tabular-nums text-foreground">{usage.total === undefined ? "Usage unavailable" : `${formatTokenUsage(usage.total)} tokens`}</p><p className="mt-0.5">{usage.unavailable ? `${usage.unavailable} unavailable · ` : ""}{job.runs.length} run{job.runs.length === 1 ? "" : "s"}</p></div>
     </a>
   </article>;
+}
+
+// One glanceable signal per card, and it answers "did the work land?" — the
+// question the board could not previously ask. Monochrome severity: a solid
+// ink chip is the loudest thing on the card, a hairline is settled.
+function Outcome({ job }) {
+  const summary = outcomeSummary(job);
+  if (summary.outcome === "none") return null;
+  const tone = summary.flagged ? "border-foreground bg-foreground text-background" : summary.landed ? "border-border text-muted-foreground" : "border-dashed border-foreground/35 text-muted-foreground";
+  const Icon = summary.landed ? GitMerge : GitPullRequest;
+  return <div className="mt-2 flex min-w-0 items-center gap-2 border-t border-border pt-2">
+    <Badge className={cn("gap-1.5", tone)}><Icon className="size-3 shrink-0" />{summary.label}</Badge>
+    {summary.pullRequest && <span className="truncate font-mono text-xs text-muted-foreground">#{summary.pullRequest.number}</span>}
+  </div>;
+}
+
+// The task page's second book: what the work did, as opposed to what the
+// process did. Read-only — machinist mirrors GitHub and never acts on it.
+function WorkPanel({ job }) {
+  const summary = outcomeSummary(job);
+  const pull = summary.pullRequest;
+  const issue = summary.issue;
+  if (summary.outcome === "none" && !issue) return null;
+  const tone = summary.flagged ? "border-foreground bg-foreground text-background" : summary.landed ? "border-border bg-surface" : "border-dashed border-foreground/40 bg-surface";
+  const checks = pull ? `${pull.checks_passed} passed · ${pull.checks_failed} failed · ${pull.checks_pending} running` : "No checks";
+  return <section aria-labelledby="task-work" className="space-y-4">
+    <div className="flex items-baseline justify-between gap-4">
+      <h2 id="task-work" className="text-sm font-semibold">Work</h2>
+      <span className="text-xs text-muted-foreground">{pull?.fetched_at ? `GitHub read ${relativeTime(pull.fetched_at)}` : "Not yet read from GitHub"}</span>
+    </div>
+
+    <div className={cn("rounded-lg border p-4", tone)}>
+      <div className="flex flex-wrap items-center gap-2">
+        {summary.landed ? <GitMerge className="size-4 shrink-0" /> : <GitPullRequest className="size-4 shrink-0" />}
+        <span className="text-sm font-semibold">{summary.label}</span>
+        {summary.flagged && <Badge className="border-current/40 uppercase">needs attention</Badge>}
+        {pull && <Button asChild variant="outline" size="sm" className="ml-auto"><a href={pull.url} target="_blank" rel="noreferrer">Pull request #{pull.number}<ExternalLink className="size-3.5" /></a></Button>}
+      </div>
+      {pull && <p className="mt-2 font-mono text-xs opacity-80">{pull.head_ref_name} → {pull.base_ref_name}{pull.head_ref_oid ? ` · ${pull.head_ref_oid.slice(0, 7)}` : ""}</p>}
+    </div>
+
+    {pull && <dl className="grid gap-x-6 gap-y-3 border-y border-border py-3 sm:grid-cols-2 lg:grid-cols-4">
+      <RunMetric label="Checks" value={checks} />
+      <RunMetric label="Merge state" value={(pull.merge_state_status || "unknown").toLowerCase()} mono />
+      <RunMetric label="Review" value={(pull.review_decision || "none").toLowerCase().replaceAll("_", " ")} />
+      <RunMetric label="Change" value={`+${pull.additions} / -${pull.deletions} in ${pull.changed_files} file${pull.changed_files === 1 ? "" : "s"}`} mono />
+      <RunMetric label="Commits" value={String(pull.commits)} mono />
+      <RunMetric label="Merged" value={pull.merged_at ? formatTimestamp(pull.merged_at) : "Not merged"} />
+      <RunMetric label="Pull request updated" value={pull.updated_at ? formatTimestamp(pull.updated_at) : "Unavailable"} />
+      <RunMetric label="Draft" value={pull.is_draft ? "Yes" : "No"} />
+    </dl>}
+
+    {issue && <div className="flex flex-wrap items-center gap-2">
+      <a href={issue.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-md font-mono text-xs underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">
+        <GitCommit className="size-3.5" />Issue #{issue.number} · {issue.state}<ExternalLink className="size-3" />
+      </a>
+      {(issue.labels || []).map((label) => <Badge key={label} className="gap-1 border-border text-muted-foreground"><Tag className="size-3" />{label}</Badge>)}
+    </div>}
+  </section>;
 }
 
 function State({ value }) {
