@@ -179,7 +179,7 @@ function App() {
           </PageHeading>
 
           {composerOpen && <RunComposer choices={choices} repositories={repositories} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} model={model} setModel={setModel} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
-          {(statusError || submitError) && <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{submitError || statusError}</div>}
+          {(statusError || submitError) && <div role="alert" className="alert">{submitError || statusError}</div>}
 
           <section>
             <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -213,7 +213,7 @@ function App() {
 
 function TaskDetail({ job, loaded, error, deleting, onDelete }) {
   if (!loaded && !error) return <div className="mx-auto max-w-[1100px] p-4 sm:p-6 lg:p-8"><p className="text-sm text-muted-foreground">Loading task…</p></div>;
-  if (!job) return <div className="mx-auto max-w-[1100px] space-y-6 p-4 sm:p-6 lg:p-8"><Button asChild variant="ghost" size="sm"><a href="#/runs"><ArrowLeft className="size-4" />Back to runs</a></Button>{error && <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{error}</div>}<div className="border-y border-border py-12 text-center"><h1 className="text-xl font-semibold">Task not found</h1><p className="mt-1 text-sm text-muted-foreground">It may have been deleted.</p></div></div>;
+  if (!job) return <div className="mx-auto max-w-[1100px] space-y-6 p-4 sm:p-6 lg:p-8"><Button asChild variant="ghost" size="sm"><a href="#/runs"><ArrowLeft className="size-4" />Back to runs</a></Button>{error && <div role="alert" className="alert">{error}</div>}<div className="border-y border-border py-12 text-center"><h1 className="text-xl font-semibold">Task not found</h1><p className="mt-1 text-sm text-muted-foreground">It may have been deleted.</p></div></div>;
   const usage = tokenUsageSummary(job.runs);
   const totalDuration = taskDurationMillis(job.runs);
   const terminal = job.state === "succeeded" || job.state === "failed";
@@ -222,9 +222,9 @@ function TaskDetail({ job, loaded, error, deleting, onDelete }) {
       <Button asChild variant="ghost" size="sm" className="-ml-3"><a href="#/runs"><ArrowLeft className="size-4" />Back to runs</a></Button>
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h1 className="truncate text-xl font-semibold" title={jobDisplayTitle(job)}>{jobDisplayTitle(job)}</h1><State value={job.state} /></div><p className="mt-1 break-all font-mono text-xs text-muted-foreground">{githubIssueReference(job) || shortId(job.id)}{githubIssueReference(job) ? ` · ${shortId(job.id)}` : ""}</p><p className="mt-1 break-all font-mono text-xs text-muted-foreground">{job.id}</p></div>
-        <Button variant="outline" className="self-start border-danger/35 text-danger hover:bg-danger/10" disabled={!terminal || deleting} onClick={() => onDelete(job)} title={terminal ? "Delete this task and its stored run data" : "Active tasks cannot be deleted"}><Trash2 className="size-4" />{deleting ? "Deleting…" : "Delete task"}</Button>
+        <Button variant="outline" className="self-start border-foreground/30 text-foreground hover:bg-foreground hover:text-background" disabled={!terminal || deleting} onClick={() => onDelete(job)} title={terminal ? "Delete this task and its stored run data" : "Active tasks cannot be deleted"}><Trash2 className="size-4" />{deleting ? "Deleting…" : "Delete task"}</Button>
       </div>
-      {error && <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{error}</div>}
+      {error && <div role="alert" className="alert">{error}</div>}
     </header>
 
     <dl className="grid border-y border-border sm:grid-cols-2 lg:grid-cols-4">
@@ -248,7 +248,7 @@ function TaskDetail({ job, loaded, error, deleting, onDelete }) {
       <ol className="mt-3 grid gap-3">{job.runs.map((run, index) => <li key={run.id}><Card className="min-w-0 p-4">
         <div className="flex min-w-0 items-start gap-3"><span className="grid size-7 shrink-0 place-items-center rounded-full border border-border font-mono text-xs text-muted-foreground">{index + 1}</span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center justify-between gap-2"><div className="min-w-0"><h3 className="truncate text-sm font-semibold">{run.command}</h3><p className="mt-0.5 truncate font-mono text-xs text-muted-foreground" title={run.id}>{run.id}</p></div><State value={run.state} /></div>
           <dl className="mt-4 grid gap-x-6 gap-y-3 border-t border-border pt-3 sm:grid-cols-2 lg:grid-cols-4"><RunMetric label="Executor" value={run.executor} mono /><RunMetric label="Requested model" value={run.model || "Executor default"} mono /><RunMetric label="Worker" value={run.worker_name || "Unassigned"} /><RunMetric label="Duration" value={Number.isSafeInteger(run.duration_millis) ? formatDurationMillis(run.duration_millis) : "Unavailable"} /><RunMetric label="Tokens" value={formatTokenUsage(run.token_usage) === "Unavailable" ? "Not reported" : `${formatTokenUsage(run.token_usage)} tokens`} /><RunMetric label="Started" value={formatTimestamp(run.started_at)} /><RunMetric label="Completed" value={formatTimestamp(run.completed_at)} /><RunMetric label="Exit code" value={run.exit_code === undefined ? "Unavailable" : String(run.exit_code)} /></dl>
-          {run.error && <div className="mt-4 border-l-2 border-danger pl-3"><p className="text-xs font-medium text-danger">Error</p><p className="mt-1 break-words text-sm text-danger">{run.error}</p></div>}
+          {run.error && <div className="mt-4 border-l-2 border-foreground pl-3"><p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Error</p><p className="mt-1 break-words text-sm text-foreground">{run.error}</p></div>}
         </div></div>
       </Card></li>)}</ol>
     </section>
@@ -259,7 +259,7 @@ function DetailMetric({ label, value, mono = false }) { return <div className="m
 function RunMetric({ label, value, mono = false }) { return <div className="min-w-0"><dt className="text-xs text-muted-foreground">{label}</dt><dd className={cn("mt-0.5 truncate text-sm", mono && "font-mono")} title={value}>{value}</dd></div>; }
 
 function RunComposer({ choices, repositories, selection, setSelection, repository, setRepository, prompt, setPrompt, model, setModel, submitting, submit, close }) {
-  return <Card className="overflow-hidden border-primary/25">
+  return <Card className="overflow-hidden border-foreground/20">
     <div className="flex items-center justify-between border-b border-border px-4 py-3 sm:px-5">
       <h2 className="text-sm font-semibold">New run</h2>
       <Button variant="ghost" size="icon" onClick={close} aria-label="Close new run form"><X className="size-4" /></Button>
@@ -296,7 +296,7 @@ function RunCard({ job }) {
   const attention = needsAttention(job.state);
   const title = jobDisplayTitle(job);
   const reference = githubIssueReference(job);
-  return <Card className={cn("min-w-0 overflow-hidden", attention && "border-danger/40 bg-danger/5")}>
+  return <Card className={cn("min-w-0 overflow-hidden", attention && "border-foreground/30 shadow-[inset_3px_0_0_0_var(--foreground)]")}>
     <a href={`#/runs/${encodeURIComponent(job.id)}`} className="block min-w-0 p-3 transition hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50" aria-label={`Open task ${title}, ${reference || shortId(job.id)}`}>
       <div className="flex min-w-0 items-start justify-between gap-2"><p className="line-clamp-2 text-sm font-medium leading-5" title={title}>{title}</p><State value={job.state} /></div>
       <p className="mt-1 truncate font-mono text-xs text-muted-foreground" title={job.id}>{reference ? `${reference} · ` : ""}{shortId(job.id)}</p>
@@ -326,8 +326,17 @@ function RunRow({ job }) {
 }
 
 function State({ value }) {
-  const tones = { running: "border-warning/25 bg-warning/10 text-warning", queued: "border-warning/25 bg-warning/10 text-warning", succeeded: "border-success/25 bg-success/10 text-success", failed: "border-danger/25 bg-danger/10 text-danger", timed_out: "border-danger/25 bg-danger/10 text-danger", cancelled: "border-danger/25 bg-danger/10 text-danger" };
-  return <Badge className={cn("gap-1.5", tones[value] || tones.queued)}><span className="size-1.5 rounded-full bg-current" />{stateLabel(value)}</Badge>;
+  // Monochrome severity: solid ink = alarm, dashed = pending, hairline = settled.
+  const tones = {
+    running: "border-foreground/30 bg-surface text-foreground",
+    queued: "border-dashed border-foreground/35 text-muted-foreground",
+    succeeded: "border-border text-muted-foreground",
+    failed: "border-foreground bg-foreground text-background",
+    timed_out: "border-foreground bg-foreground text-background",
+    cancelled: "border-dashed border-foreground/60 text-foreground",
+  };
+  const dots = { running: "bg-current pulse-dot", queued: "border border-current", succeeded: "bg-current opacity-50", failed: "bg-current", timed_out: "bg-current", cancelled: "bg-current" };
+  return <Badge className={cn("gap-1.5", tones[value] || tones.queued)}><span className={cn("size-1.5 shrink-0 rounded-full", dots[value] || dots.queued)} />{stateLabel(value)}</Badge>;
 }
 
 function EmptyRuns({ filtered, openComposer }) {

@@ -15,11 +15,11 @@ export function Analytics({ jobs, loaded, error }) {
       <label className="w-full sm:w-40"><span className="field-label">Time window</span><select className="field-control" value={days} onChange={(event) => setDays(event.target.value)}><option value="7">Last 7 days</option><option value="30">Last 30 days</option></select></label>
     </PageHeading>
 
-    {view.kind === "error" ? <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{view.message}</div> : view.kind === "loading" ? <Card><QuietState title="Measuring the work" description="Loading task outcomes and reported usage." role="status" /></Card> : <>
+    {view.kind === "error" ? <div role="alert" className="alert">{view.message}</div> : view.kind === "loading" ? <Card><QuietState title="Measuring the work" description="Loading task outcomes and reported usage." role="status" /></Card> : <>
       <section className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]" aria-label="Task metrics">
-        <Card className="flex min-h-48 flex-col justify-between border-primary/25 bg-primary/5 p-5 sm:p-6">
-          <div><p className="text-sm font-medium text-muted-foreground">Average task time</p><p className="mt-3 break-words text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl">{formatDurationMillis(view.metrics.averageTaskDurationMillis)}</p></div>
-          <p className="mt-6 text-sm text-muted-foreground">{view.metrics.contributingTasks} contributing task{view.metrics.contributingTasks === 1 ? "" : "s"} with complete run timing</p>
+        <Card className="flex min-h-48 flex-col justify-between border-foreground bg-foreground p-5 text-background sm:p-6">
+          <div><p className="text-[11px] font-semibold uppercase tracking-wider text-background/60">Average task time</p><p className="mt-3 break-words text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl">{formatDurationMillis(view.metrics.averageTaskDurationMillis)}</p></div>
+          <p className="mt-6 text-sm text-background/70">{view.metrics.contributingTasks} contributing task{view.metrics.contributingTasks === 1 ? "" : "s"} with complete run timing</p>
         </Card>
         <div className="grid grid-cols-2 gap-3 sm:gap-4">
           <Metric label="Total tasks" value={view.metrics.totalTasks} />

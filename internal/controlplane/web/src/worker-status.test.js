@@ -7,7 +7,10 @@ test("workers show connected and disconnected poll status", async () => {
   const main = await readFile(new URL("./main.jsx", import.meta.url), "utf8");
 
   assert.match(catalog, /worker\.connected \? "Connected" : "Disconnected"/);
-  assert.match(catalog, /worker\.connected \? "[^"]*text-success"/);
+  // The palette is monochrome, so connected/disconnected are distinguished by
+  // form: a filled, pulsing dot against a dashed hollow one.
+  assert.match(catalog, /worker\.connected \? "[^"]*text-foreground" : "[^"]*border-dashed[^"]*"/);
+  assert.match(catalog, /worker\.connected \? "[^"]*bg-current pulse-dot" : "[^"]*border border-current"/);
   assert.match(catalog, /Last seen \{relativeTime\(worker\.last_seen_at\)\}/);
   assert.match(main, /status\.workers\.filter\(\(worker\) => worker\.connected\)\.length/);
   assert.match(main, /worker\$\{connectedWorkers === 1 \? "" : "s"\} online/);
