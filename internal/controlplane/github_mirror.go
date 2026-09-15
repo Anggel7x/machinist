@@ -56,7 +56,6 @@ type PullRequestMirror struct {
 	Additions        int       `json:"additions"`
 	Deletions        int       `json:"deletions"`
 	ChangedFiles     int       `json:"changed_files"`
-	Commits          int       `json:"commits"`
 	ChecksState      string    `json:"checks_state"`
 	ChecksPassed     int       `json:"checks_passed"`
 	ChecksFailed     int       `json:"checks_failed"`

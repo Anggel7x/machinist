@@ -638,8 +638,15 @@ func decodeSingleJSON(output []byte, target any) error {
 // pullRequestFields is one call's worth of everything the mirror caches.
 // closingIssuesReferences comes back with the pull request, so one list per
 // repository resolves issues to pull requests without a call per job.
+//
+// `commits` must not be added back. It is a connection, not a scalar, so
+// requesting it for a page of pull requests asks GitHub for every commit and
+// every commit's authors at once; GitHub rejects the whole query on cost
+// ("exceeds the maximum limit of 500,000 nodes") and the repository mirrors
+// nothing at all. Change size is carried by additions, deletions and
+// changedFiles, which are scalars.
 const pullRequestFields = "number,url,title,state,isDraft,mergeable,mergeStateStatus,reviewDecision,mergedAt," +
-	"headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,commits,closingIssuesReferences," +
+	"headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,closingIssuesReferences," +
 	"statusCheckRollup,createdAt,updatedAt"
 
 const issueFields = "number,url,state,labels,updatedAt"
@@ -738,7 +745,6 @@ func (g *GitHubCLI) ListPullRequests(ctx context.Context, repository string, lim
 			Additions:        entry.Additions,
 			Deletions:        entry.Deletions,
 			ChangedFiles:     entry.ChangedFiles,
-			Commits:          len(entry.Commits),
 			CreatedAt:        parseGitHubTime(entry.CreatedAt),
 			UpdatedAt:        parseGitHubTime(entry.UpdatedAt),
 		}

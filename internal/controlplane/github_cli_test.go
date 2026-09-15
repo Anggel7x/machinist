@@ -378,7 +378,7 @@ func TestGitHubCLIListPullRequestsRollsUpChecksAndLinksItsIssue(t *testing.T) {
   {"number":48,"url":"https://github.com/o/r/pull/48","title":"Ticket seam","state":"OPEN","isDraft":false,
    "mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","reviewDecision":"APPROVED","mergedAt":null,
    "headRefName":"machinist/39","headRefOid":"0f3ad45","baseRefName":"main",
-   "additions":140,"deletions":12,"changedFiles":6,"commits":[{"oid":"a"},{"oid":"b"}],
+   "additions":140,"deletions":12,"changedFiles":6,
    "closingIssuesReferences":[{"number":39}],"updatedAt":"2026-09-15T10:00:00Z",
    "statusCheckRollup":[
      {"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"},
@@ -387,7 +387,7 @@ func TestGitHubCLIListPullRequestsRollsUpChecksAndLinksItsIssue(t *testing.T) {
   {"number":49,"url":"https://github.com/o/r/pull/49","title":"Landed","state":"MERGED","isDraft":false,
    "mergeable":"UNKNOWN","mergeStateStatus":"CLEAN","reviewDecision":"","mergedAt":"2026-09-14T09:00:00Z",
    "headRefName":"machinist/40","headRefOid":"beefbee","baseRefName":"main",
-   "additions":3,"deletions":1,"changedFiles":1,"commits":[{"oid":"c"}],
+   "additions":3,"deletions":1,"changedFiles":1,
    "closingIssuesReferences":[],"updatedAt":"2026-09-14T09:00:00Z","statusCheckRollup":[]}
 ]`}, scriptedGitHubResult{stdout: `[]`})
 
@@ -415,7 +415,7 @@ func TestGitHubCLIListPullRequestsRollsUpChecksAndLinksItsIssue(t *testing.T) {
 	if blocked.ChecksState != ChecksFailing || blocked.ChecksPassed != 1 || blocked.ChecksFailed != 1 || blocked.ChecksPending != 1 {
 		t.Fatalf("checks = %q %d/%d/%d", blocked.ChecksState, blocked.ChecksPassed, blocked.ChecksFailed, blocked.ChecksPending)
 	}
-	if blocked.Commits != 2 || blocked.Additions != 140 || blocked.ChangedFiles != 6 {
+	if blocked.Additions != 140 || blocked.Deletions != 12 || blocked.ChangedFiles != 6 {
 		t.Fatalf("change size = %#v", blocked)
 	}
 
@@ -482,5 +482,14 @@ func TestGitHubCLIListPullRequestsTracksOpenWorkBeyondTheRecentWindow(t *testing
 	}
 	if seen[48] != "open" || seen[90] != "merged" {
 		t.Fatalf("pulls = %v", seen)
+	}
+}
+
+func TestGitHubCLIDoesNotRequestTheCommitsConnection(t *testing.T) {
+	// Asking for `commits` across a page of pull requests makes GitHub reject
+	// the query on cost, and the repository then mirrors nothing at all. This
+	// is cheap insurance against it being added back as "just one more field".
+	if strings.Contains(pullRequestFields, "commits") {
+		t.Fatalf("pull request fields must not request the commits connection: %s", pullRequestFields)
 	}
 }

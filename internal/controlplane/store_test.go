@@ -1248,7 +1248,7 @@ func TestSnapshotReportsOutcomeFromMirroredGitHubState(t *testing.T) {
 			URL: "https://github.com/owainlewis/machinist/pull/48", Title: "Ticket seam",
 			State: "open", ChecksState: ChecksPassing, ChecksPassed: 7, MergeStateStatus: "BLOCKED",
 			ReviewDecision: "APPROVED", HeadRefName: "machinist/396", BaseRefName: "main",
-			Additions: 140, Deletions: 12, ChangedFiles: 6, Commits: 3,
+			Additions: 140, Deletions: 12, ChangedFiles: 6,
 			UpdatedAt: clock.Now().Add(-2 * time.Hour),
 		}},
 		[]IssueMirror{{
@@ -1272,7 +1272,7 @@ func TestSnapshotReportsOutcomeFromMirroredGitHubState(t *testing.T) {
 	if tracked.Outcome != OutcomeBlocked || !tracked.OutcomeFlagged {
 		t.Fatalf("outcome = %q flagged = %v, want %q true", tracked.Outcome, tracked.OutcomeFlagged, OutcomeBlocked)
 	}
-	if tracked.PullRequest == nil || tracked.PullRequest.Number != 48 || tracked.PullRequest.Commits != 3 {
+	if tracked.PullRequest == nil || tracked.PullRequest.Number != 48 || tracked.PullRequest.ChangedFiles != 6 {
 		t.Fatalf("pull request = %#v", tracked.PullRequest)
 	}
 	if tracked.Issue == nil || len(tracked.Issue.Labels) != 2 || tracked.Issue.Labels[1] != "serial" {
@@ -1300,5 +1300,41 @@ func TestPollRecordsTheHostRunningEachWorker(t *testing.T) {
 	}
 	if len(snapshot.Workers) != 1 || snapshot.Workers[0].Host != "build-2" {
 		t.Fatalf("workers = %#v, want the reported host", snapshot.Workers)
+	}
+}
+
+func TestOpenStoreAddsWorkerHostToAnExistingDatabase(t *testing.T) {
+	// CREATE TABLE IF NOT EXISTS cannot add a column to a table that already
+	// exists, so a column added in a later schema version needs an explicit
+	// upgrade. Every existing deployment arrives here.
+	path := filepath.Join(t.TempDir(), "machinist.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE workers (instance_id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen_at TEXT NOT NULL);
+INSERT INTO workers VALUES('worker_1','machinist-vm','2026-09-15T12:00:00Z');
+PRAGMA user_version=2;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatalf("snapshot of an upgraded database: %v", err)
+	}
+	if len(snapshot.Workers) != 1 || snapshot.Workers[0].Name != "machinist-vm" {
+		t.Fatalf("workers = %#v", snapshot.Workers)
+	}
+	if snapshot.Workers[0].Host != "" {
+		t.Fatalf("host = %q, want empty until the worker reports one", snapshot.Workers[0].Host)
 	}
 }

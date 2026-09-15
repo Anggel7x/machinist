@@ -372,7 +372,6 @@ function WorkPanel({ job }) {
       <RunMetric label="Merge state" value={(pull.merge_state_status || "unknown").toLowerCase()} mono />
       <RunMetric label="Review" value={(pull.review_decision || "none").toLowerCase().replaceAll("_", " ")} />
       <RunMetric label="Change" value={`+${pull.additions} / -${pull.deletions} in ${pull.changed_files} file${pull.changed_files === 1 ? "" : "s"}`} mono />
-      <RunMetric label="Commits" value={String(pull.commits)} mono />
       <RunMetric label="Merged" value={pull.merged_at ? formatTimestamp(pull.merged_at) : "Not merged"} />
       <RunMetric label="Pull request updated" value={pull.updated_at ? formatTimestamp(pull.updated_at) : "Unavailable"} />
       <RunMetric label="Draft" value={pull.is_draft ? "Yes" : "No"} />

@@ -202,6 +202,11 @@ DROP TABLE IF EXISTS runs; DROP TABLE IF EXISTS jobs; PRAGMA foreign_keys=ON;`);
 			return fmt.Errorf("upgrade database schema to version 2: %w", err)
 		}
 	}
+	if version >= 1 && version < 3 {
+		if err := s.upgradeToVersionThree(ctx); err != nil {
+			return fmt.Errorf("upgrade database schema to version 3: %w", err)
+		}
+	}
 	const schema = `
 PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
 CREATE TABLE IF NOT EXISTS jobs (
@@ -231,7 +236,7 @@ CREATE TABLE IF NOT EXISTS github_pull_requests (
  is_draft INTEGER NOT NULL DEFAULT 0, mergeable INTEGER NOT NULL DEFAULT 0, merge_state_status TEXT NOT NULL DEFAULT '',
  review_decision TEXT NOT NULL DEFAULT '', merged_at TEXT NOT NULL DEFAULT '', head_ref_name TEXT NOT NULL DEFAULT '',
  head_ref_oid TEXT NOT NULL DEFAULT '', base_ref_name TEXT NOT NULL DEFAULT '', additions INTEGER NOT NULL DEFAULT 0,
- deletions INTEGER NOT NULL DEFAULT 0, changed_files INTEGER NOT NULL DEFAULT 0, commits INTEGER NOT NULL DEFAULT 0,
+ deletions INTEGER NOT NULL DEFAULT 0, changed_files INTEGER NOT NULL DEFAULT 0,
  checks_state TEXT NOT NULL DEFAULT 'none', checks_passed INTEGER NOT NULL DEFAULT 0, checks_failed INTEGER NOT NULL DEFAULT 0,
  checks_pending INTEGER NOT NULL DEFAULT 0, issue_number INTEGER NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '',
@@ -244,6 +249,32 @@ CREATE TABLE IF NOT EXISTS github_issues (
 PRAGMA user_version=3;`
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("initialize database: %w", err)
+	}
+	return nil
+}
+
+// upgradeToVersionThree adds the columns version three introduced on tables
+// that already exist. The schema block below creates missing tables, but
+// CREATE TABLE IF NOT EXISTS leaves an existing table alone, so a new column
+// on an old table has to be added explicitly — which is every deployment that
+// predates it.
+func (s *Store) upgradeToVersionThree(ctx context.Context) error {
+	var existing int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workers'`).Scan(&existing); err != nil {
+		return err
+	}
+	if existing == 0 {
+		// No table yet; the schema block below creates it with the column.
+		return nil
+	}
+	var host int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('workers') WHERE name='host'`).Scan(&host); err != nil {
+		return err
+	}
+	if host == 0 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE workers ADD COLUMN host TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add workers.host: %w", err)
+		}
 	}
 	return nil
 }
@@ -1104,7 +1135,7 @@ func (s *Store) attachGitHubOutcomes(ctx context.Context, jobs []Job) error {
 func (s *Store) readGitHubMirror(ctx context.Context) (map[mirrorKey]PullRequestMirror, map[mirrorKey]IssueMirror, error) {
 	pulls := map[mirrorKey]PullRequestMirror{}
 	rows, err := s.db.QueryContext(ctx, `SELECT repository,number,url,title,state,is_draft,mergeable,merge_state_status,review_decision,merged_at,
-head_ref_name,head_ref_oid,base_ref_name,additions,deletions,changed_files,commits,
+head_ref_name,head_ref_oid,base_ref_name,additions,deletions,changed_files,
 checks_state,checks_passed,checks_failed,checks_pending,issue_number,created_at,updated_at,fetched_at
 FROM github_pull_requests WHERE issue_number>0 ORDER BY number`)
 	if err != nil {
@@ -1115,7 +1146,7 @@ FROM github_pull_requests WHERE issue_number>0 ORDER BY number`)
 		var mergedAt, createdAt, updatedAt, fetchedAt string
 		if err := rows.Scan(&pull.Repository, &pull.Number, &pull.URL, &pull.Title, &pull.State, &pull.IsDraft, &pull.Mergeable,
 			&pull.MergeStateStatus, &pull.ReviewDecision, &mergedAt, &pull.HeadRefName, &pull.HeadRefOID, &pull.BaseRefName,
-			&pull.Additions, &pull.Deletions, &pull.ChangedFiles, &pull.Commits,
+			&pull.Additions, &pull.Deletions, &pull.ChangedFiles,
 			&pull.ChecksState, &pull.ChecksPassed, &pull.ChecksFailed, &pull.ChecksPending, &pull.IssueNumber, &createdAt, &updatedAt, &fetchedAt); err != nil {
 			rows.Close()
 			return nil, nil, err
@@ -1173,20 +1204,20 @@ func (s *Store) ReplaceRepositoryMirror(ctx context.Context, repository string, 
 	for _, pull := range pulls {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO github_pull_requests
 (repository,number,url,title,state,is_draft,mergeable,merge_state_status,review_decision,merged_at,
-head_ref_name,head_ref_oid,base_ref_name,additions,deletions,changed_files,commits,
+head_ref_name,head_ref_oid,base_ref_name,additions,deletions,changed_files,
 checks_state,checks_passed,checks_failed,checks_pending,issue_number,created_at,updated_at,fetched_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(repository,number) DO UPDATE SET url=excluded.url,title=excluded.title,state=excluded.state,
 is_draft=excluded.is_draft,mergeable=excluded.mergeable,merge_state_status=excluded.merge_state_status,
 review_decision=excluded.review_decision,merged_at=excluded.merged_at,head_ref_name=excluded.head_ref_name,
 head_ref_oid=excluded.head_ref_oid,base_ref_name=excluded.base_ref_name,additions=excluded.additions,
-deletions=excluded.deletions,changed_files=excluded.changed_files,commits=excluded.commits,
+deletions=excluded.deletions,changed_files=excluded.changed_files,
 checks_state=excluded.checks_state,checks_passed=excluded.checks_passed,checks_failed=excluded.checks_failed,
 checks_pending=excluded.checks_pending,issue_number=excluded.issue_number,created_at=excluded.created_at,updated_at=excluded.updated_at,
 fetched_at=excluded.fetched_at`,
 			repository, pull.Number, pull.URL, pull.Title, pull.State, pull.IsDraft, pull.Mergeable,
 			pull.MergeStateStatus, pull.ReviewDecision, formatStoredTime(pull.MergedAt),
-			pull.HeadRefName, pull.HeadRefOID, pull.BaseRefName, pull.Additions, pull.Deletions, pull.ChangedFiles, pull.Commits,
+			pull.HeadRefName, pull.HeadRefOID, pull.BaseRefName, pull.Additions, pull.Deletions, pull.ChangedFiles,
 			pull.ChecksState, pull.ChecksPassed, pull.ChecksFailed, pull.ChecksPending, pull.IssueNumber,
 			formatStoredTime(pull.CreatedAt), formatStoredTime(pull.UpdatedAt), stamp); err != nil {
 			return fmt.Errorf("mirror pull request %s#%d: %w", repository, pull.Number, err)
