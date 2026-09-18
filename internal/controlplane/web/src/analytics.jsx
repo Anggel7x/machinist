@@ -11,7 +11,7 @@ export function Analytics({ jobs, loaded, error }) {
   const runs = view.runs || [];
   const usage = useMemo(() => tokenUsageSummary(runs), [runs]);
   const tasks = view.metrics?.tasks || [];
-  const byRepository = useMemo(() => usageBreakdown(tasks, "repository"), [tasks]);
+  const byRepository = useMemo(() => usageBreakdown(tasks, "repository", "command"), [tasks]);
   const byCommand = useMemo(() => usageBreakdown(tasks, "command"), [tasks]);
 
   return <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
@@ -38,7 +38,7 @@ export function Analytics({ jobs, loaded, error }) {
         <Card className="p-4 sm:p-5"><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Reporting coverage</p><p className="mt-2 text-2xl font-semibold tabular-nums">{formatReportingCoverage(usage)}</p><p className="mt-1 text-xs text-muted-foreground">{usage.unavailable ? `${usage.unavailable} completed ${usage.unavailable === 1 ? "run has" : "runs have"} unavailable usage.` : usage.completed ? "Every completed run reported usage." : "No completed runs in this window."}</p></Card>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="space-y-6">
         <Breakdown id="repository-breakdown" title="By repository" rows={byRepository} />
         <Breakdown id="command-breakdown" title="By command" rows={byCommand} />
       </div>
@@ -62,21 +62,30 @@ export function Analytics({ jobs, loaded, error }) {
 }
 
 function Breakdown({ id, title, rows }) {
-  const columns = "sm:grid-cols-[minmax(8rem,1fr)_4rem_8rem_minmax(9rem,11rem)]";
   return <section aria-labelledby={id} className="min-w-0">
-    <div className="mb-3"><h2 id={id} className="text-sm font-semibold">{title}</h2><p className="mt-1 text-xs text-muted-foreground">Run time and reported token usage of completed runs, grouped by task.</p></div>
+    <div className="mb-3"><h2 id={id} className="text-sm font-semibold">{title}</h2><p className="mt-1 text-xs text-muted-foreground">Average time of finished tasks, with total run time and reported token usage of completed runs.</p></div>
     <Card className="overflow-hidden">
-      <div className={`hidden gap-4 border-b border-border bg-muted/35 px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground sm:grid ${columns}`}>
-        <span>Name</span><span className="text-right">Tasks</span><span className="text-right">Run time</span><span className="text-right">Reported tokens</span>
+      <div className={`hidden gap-4 border-b border-border bg-muted/35 px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground sm:grid ${breakdownColumns}`}>
+        <span>Name</span><span className="text-right">Tasks</span><span className="text-right">Avg task</span><span className="text-right">Run time</span><span className="text-right">Reported tokens</span>
       </div>
-      {rows.length ? rows.map((row) => <div key={row.name} className={`grid gap-1 border-b border-border px-4 py-3 last:border-b-0 sm:items-center sm:gap-4 ${columns}`}>
-        <p className="truncate font-mono text-sm font-medium" title={row.name}>{row.name}</p>
-        <p className="text-sm tabular-nums sm:text-right"><span className="sm:hidden text-muted-foreground">Tasks · </span>{row.tasks}</p>
-        <p className="text-sm tabular-nums sm:text-right"><span className="sm:hidden text-muted-foreground">Run time · </span>{row.durationMillis === null ? "No completed runs" : formatDurationMillis(row.durationMillis)}</p>
-        <div className="min-w-0 sm:text-right"><p className="break-all text-sm tabular-nums"><span className="sm:hidden text-muted-foreground">Reported tokens · </span>{row.usage.total === undefined ? "Not reported" : formatTokenUsage(row.usage.total)}</p><p className="text-xs text-muted-foreground">{row.usage.completed ? `${row.usage.reported} of ${row.usage.completed} runs reported` : "No completed runs"}</p></div>
+      {rows.length ? rows.map((row) => <div key={row.name} className="border-b border-border last:border-b-0">
+        <BreakdownRow row={row} />
+        {row.children?.map((child) => <BreakdownRow key={child.name} row={child} nested />)}
       </div>) : <div className="grid place-items-center p-12 text-sm text-muted-foreground">No tasks in this window.</div>}
     </Card>
   </section>;
+}
+
+const breakdownColumns = "sm:grid-cols-[minmax(8rem,1fr)_4rem_7rem_8rem_minmax(9rem,11rem)]";
+
+function BreakdownRow({ row, nested = false }) {
+  return <div className={`grid gap-1 px-4 sm:items-center sm:gap-4 ${breakdownColumns} ${nested ? "py-2 text-muted-foreground" : "py-3"}`}>
+    <p className={`truncate font-mono text-sm ${nested ? "pl-4" : "font-medium text-foreground"}`} title={row.name}>{nested ? "↳ " : ""}{row.name}</p>
+    <p className="text-sm tabular-nums sm:text-right"><span className="sm:hidden text-muted-foreground">Tasks · </span>{row.tasks}</p>
+    <p className="text-sm tabular-nums sm:text-right" title={`${row.contributingTasks} finished task${row.contributingTasks === 1 ? "" : "s"} with complete run timing`}><span className="sm:hidden text-muted-foreground">Avg task · </span>{row.averageTaskDurationMillis === null ? "No finished tasks" : formatDurationMillis(row.averageTaskDurationMillis)}</p>
+    <p className="text-sm tabular-nums sm:text-right"><span className="sm:hidden text-muted-foreground">Run time · </span>{row.durationMillis === null ? "No completed runs" : formatDurationMillis(row.durationMillis)}</p>
+    <div className="min-w-0 sm:text-right"><p className="break-all text-sm tabular-nums"><span className="sm:hidden text-muted-foreground">Reported tokens · </span>{row.usage.total === undefined ? "Not reported" : formatTokenUsage(row.usage.total)}</p><p className="text-xs text-muted-foreground">{row.usage.completed ? `${row.usage.reported} of ${row.usage.completed} runs reported` : "No completed runs"}</p></div>
+  </div>;
 }
 
 function Metric({ label, value }) { return <Card className="min-w-0 p-4 sm:p-5"><p className="text-xs font-medium text-muted-foreground sm:text-sm">{label}</p><p className="mt-2 text-xl font-semibold tracking-tight tabular-nums sm:text-3xl">{typeof value === "number" ? <AnimatedNumber value={value} duration={0.6} /> : value}</p></Card>; }

@@ -122,19 +122,35 @@ test("formatTaskTokenUsage marks partial totals as reported", () => {
 test("usageBreakdown totals completed run time and reported tokens per group", () => {
   const completed_at = localDate(2026, 8, 25, 12);
   const tasks = [
-    { repository: "crm-kit", command: "foreman", runs: [{ completed_at, duration_millis: 1000, token_usage: "100" }] },
-    { repository: "crm-kit", command: "shepherd", runs: [{ completed_at, duration_millis: 500 }, { completed_at: "0001-01-01T00:00:00Z", duration_millis: 9000, token_usage: "9" }] },
-    { repository: "machinist", command: "foreman", runs: [{ completed_at, duration_millis: 4000, token_usage: "7" }] },
-    { repository: " ", command: "audit", runs: [] },
+    { repository: "crm-kit", command: "foreman", state: "succeeded", runs: [{ completed_at, duration_millis: 1000, token_usage: "100" }] },
+    { repository: "crm-kit", command: "shepherd", state: "running", runs: [{ completed_at, duration_millis: 500 }, { completed_at: "0001-01-01T00:00:00Z", duration_millis: 9000, token_usage: "9" }] },
+    { repository: "machinist", command: "foreman", state: "failed", runs: [{ completed_at, duration_millis: 4000, token_usage: "7" }] },
+    { repository: " ", command: "audit", state: "queued", runs: [] },
   ];
   assert.deepEqual(usageBreakdown(tasks, "repository"), [
-    { name: "machinist", tasks: 1, durationMillis: 4000, timedRuns: 1, usage: { total: "7", reported: 1, completed: 1, unavailable: 0 } },
-    { name: "crm-kit", tasks: 2, durationMillis: 1500, timedRuns: 2, usage: { total: "100", reported: 1, completed: 2, unavailable: 1 } },
-    { name: "Unspecified", tasks: 1, durationMillis: null, timedRuns: 0, usage: { total: undefined, reported: 0, completed: 0, unavailable: 0 } },
+    { name: "machinist", tasks: 1, averageTaskDurationMillis: 4000, contributingTasks: 1, durationMillis: 4000, timedRuns: 1, usage: { total: "7", reported: 1, completed: 1, unavailable: 0 } },
+    { name: "crm-kit", tasks: 2, averageTaskDurationMillis: 1000, contributingTasks: 1, durationMillis: 1500, timedRuns: 2, usage: { total: "100", reported: 1, completed: 2, unavailable: 1 } },
+    { name: "Unspecified", tasks: 1, averageTaskDurationMillis: null, contributingTasks: 0, durationMillis: null, timedRuns: 0, usage: { total: undefined, reported: 0, completed: 0, unavailable: 0 } },
   ]);
-  assert.deepEqual(usageBreakdown(tasks, "command").map((row) => [row.name, row.durationMillis, row.usage.total]), [
-    ["foreman", 5000, "107"], ["shepherd", 500, undefined], ["audit", null, undefined],
+  assert.deepEqual(usageBreakdown(tasks, "command").map((row) => [row.name, row.averageTaskDurationMillis, row.durationMillis, row.usage.total]), [
+    ["foreman", 2500, 5000, "107"], ["shepherd", null, 500, undefined], ["audit", null, null, undefined],
   ]);
+});
+
+test("usageBreakdown subdivides each group by a second field", () => {
+  const completed_at = localDate(2026, 8, 25, 12);
+  const tasks = [
+    { repository: "crm-kit", command: "foreman", state: "succeeded", runs: [{ completed_at, duration_millis: 1000 }] },
+    { repository: "crm-kit", command: "foreman", state: "succeeded", runs: [{ completed_at, duration_millis: 3000 }] },
+    { repository: "crm-kit", command: "shepherd", state: "succeeded", runs: [{ completed_at, duration_millis: 200 }] },
+    { repository: "machinist", command: "audit", state: "succeeded", runs: [{ completed_at, duration_millis: 50 }] },
+  ];
+  const rows = usageBreakdown(tasks, "repository", "command");
+  assert.deepEqual(rows.map((row) => [row.name, row.averageTaskDurationMillis, row.children.map((child) => [child.name, child.tasks, child.averageTaskDurationMillis])]), [
+    ["crm-kit", 1400, [["foreman", 2, 2000], ["shepherd", 1, 200]]],
+    ["machinist", 50, [["audit", 1, 50]]],
+  ]);
+  assert.equal(rows[0].children[0].children, undefined);
 });
 
 test("runModelSummary reports every distinct configured model and honest fallbacks", () => {
@@ -160,7 +176,7 @@ test("runDetails always surfaces the executor, even when a worker has claimed th
 
 test("analytics presents task KPIs while retaining completed run metrics", async () => {
   const source = await readFile(new URL("./analytics.jsx", import.meta.url), "utf8");
-  for (const label of ["Average task time", "Total tasks", "Success rate", "Failed tasks", "Active tasks", "Total reported tokens", "Reporting coverage", "Duration", "Reported token usage", "By repository", "By command", "Not reported", "runs reported"]) {
+  for (const label of ["Average task time", "Total tasks", "Success rate", "Failed tasks", "Active tasks", "Total reported tokens", "Reporting coverage", "Duration", "Reported token usage", "By repository", "By command", "Not reported", "runs reported", "Avg task"]) {
     assert.match(source, new RegExp(label));
   }
 });

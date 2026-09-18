@@ -87,7 +87,9 @@ export function tokenUsageSummary(runs) {
 
 // usageBreakdown groups tasks by a job field, such as repository or command, and
 // totals the measured run time and reported token usage of their completed runs.
-export function usageBreakdown(tasks, field) {
+// Average task time follows taskAnalytics: terminal tasks with complete run timing.
+// A subfield splits each group again, returned as the group's children.
+export function usageBreakdown(tasks, field, subfield) {
   const groups = new Map();
   for (const task of tasks) {
     const name = typeof task[field] === "string" && task[field].trim() ? task[field].trim() : "Unspecified";
@@ -97,13 +99,21 @@ export function usageBreakdown(tasks, field) {
   return [...groups].map(([name, groupTasks]) => {
     const runs = completedRunsForTasks(groupTasks);
     const timedRuns = runs.filter((run) => validDuration(run.duration_millis));
-    return {
+    const taskDurations = groupTasks.filter((task) => terminalTaskStates.has(task.state)).flatMap((task) => {
+      const duration = taskDurationMillis(task.runs);
+      return duration === undefined ? [] : [duration];
+    });
+    const row = {
       name,
       tasks: groupTasks.length,
+      averageTaskDurationMillis: taskDurations.length ? Math.round(taskDurations.reduce((total, duration) => total + duration, 0) / taskDurations.length) : null,
+      contributingTasks: taskDurations.length,
       durationMillis: timedRuns.length ? timedRuns.reduce((total, run) => total + run.duration_millis, 0) : null,
       timedRuns: timedRuns.length,
       usage: tokenUsageSummary(runs),
     };
+    if (subfield) row.children = usageBreakdown(groupTasks, subfield);
+    return row;
   }).sort((left, right) => (right.durationMillis ?? -1) - (left.durationMillis ?? -1) || left.name.localeCompare(right.name));
 }
 
