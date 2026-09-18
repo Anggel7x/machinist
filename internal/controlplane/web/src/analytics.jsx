@@ -72,8 +72,8 @@ function Breakdown({ id, title, rows }) {
       {rows.length ? rows.map((row) => <div key={row.name} className={`grid gap-1 border-b border-border px-4 py-3 last:border-b-0 sm:items-center sm:gap-4 ${columns}`}>
         <p className="truncate font-mono text-sm font-medium" title={row.name}>{row.name}</p>
         <p className="text-sm tabular-nums sm:text-right"><span className="sm:hidden text-muted-foreground">Tasks · </span>{row.tasks}</p>
-        <p className="text-sm tabular-nums sm:text-right"><span className="sm:hidden text-muted-foreground">Run time · </span>{row.durationMillis === null ? "Unavailable" : formatDurationMillis(row.durationMillis)}</p>
-        <div className="min-w-0 sm:text-right"><p className="break-all text-sm tabular-nums"><span className="sm:hidden text-muted-foreground">Reported tokens · </span>{formatTokenUsage(row.usage.total)}</p><p className="text-xs text-muted-foreground">{formatReportingCoverage(row.usage)}</p></div>
+        <p className="text-sm tabular-nums sm:text-right"><span className="sm:hidden text-muted-foreground">Run time · </span>{row.durationMillis === null ? "No completed runs" : formatDurationMillis(row.durationMillis)}</p>
+        <div className="min-w-0 sm:text-right"><p className="break-all text-sm tabular-nums"><span className="sm:hidden text-muted-foreground">Reported tokens · </span>{row.usage.total === undefined ? "Not reported" : formatTokenUsage(row.usage.total)}</p><p className="text-xs text-muted-foreground">{row.usage.completed ? `${row.usage.reported} of ${row.usage.completed} runs reported` : "No completed runs"}</p></div>
       </div>) : <div className="grid place-items-center p-12 text-sm text-muted-foreground">No tasks in this window.</div>}
     </Card>
   </section>;
