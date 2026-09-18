@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { completedRuns, formatDurationMillis, formatReportingCoverage, formatSuccessRate, formatTaskTokenUsage, formatTokenUsage, runDetails, runModelSummary, taskAnalytics, taskDurationMillis, tasksInWindow, tokenUsageSummary } from "./run-metrics.js";
+import { completedRuns, formatDurationMillis, formatReportingCoverage, formatSuccessRate, formatTaskTokenUsage, formatTokenUsage, runDetails, runModelSummary, taskAnalytics, taskDurationMillis, tasksInWindow, tokenUsageSummary, usageBreakdown } from "./run-metrics.js";
 
 function localDate(year, month, day, hour = 0) {
   return new Date(year, month - 1, day, hour).toISOString();
@@ -119,6 +119,24 @@ test("formatTaskTokenUsage marks partial totals as reported", () => {
   assert.equal(formatTaskTokenUsage({ total: "4321", unavailable: 2 }), "4,321 tokens reported · 2 runs unreported");
 });
 
+test("usageBreakdown totals completed run time and reported tokens per group", () => {
+  const completed_at = localDate(2026, 8, 25, 12);
+  const tasks = [
+    { repository: "crm-kit", command: "foreman", runs: [{ completed_at, duration_millis: 1000, token_usage: "100" }] },
+    { repository: "crm-kit", command: "shepherd", runs: [{ completed_at, duration_millis: 500 }, { completed_at: "0001-01-01T00:00:00Z", duration_millis: 9000, token_usage: "9" }] },
+    { repository: "machinist", command: "foreman", runs: [{ completed_at, duration_millis: 4000, token_usage: "7" }] },
+    { repository: " ", command: "audit", runs: [] },
+  ];
+  assert.deepEqual(usageBreakdown(tasks, "repository"), [
+    { name: "machinist", tasks: 1, durationMillis: 4000, timedRuns: 1, usage: { total: "7", reported: 1, completed: 1, unavailable: 0 } },
+    { name: "crm-kit", tasks: 2, durationMillis: 1500, timedRuns: 2, usage: { total: "100", reported: 1, completed: 2, unavailable: 1 } },
+    { name: "Unspecified", tasks: 1, durationMillis: null, timedRuns: 0, usage: { total: undefined, reported: 0, completed: 0, unavailable: 0 } },
+  ]);
+  assert.deepEqual(usageBreakdown(tasks, "command").map((row) => [row.name, row.durationMillis, row.usage.total]), [
+    ["foreman", 5000, "107"], ["shepherd", 500, undefined], ["audit", null, undefined],
+  ]);
+});
+
 test("runModelSummary reports every distinct configured model and honest fallbacks", () => {
   assert.equal(runModelSummary([{ model: "gpt-5.6-sol" }, { model: "gpt-5.6-sol" }]), "gpt-5.6-sol");
   assert.equal(runModelSummary([{ model: "deepseek-v4-flash" }, { model: "gpt-5.6-sol" }]), "deepseek-v4-flash · gpt-5.6-sol");
@@ -142,7 +160,7 @@ test("runDetails always surfaces the executor, even when a worker has claimed th
 
 test("analytics presents task KPIs while retaining completed run metrics", async () => {
   const source = await readFile(new URL("./analytics.jsx", import.meta.url), "utf8");
-  for (const label of ["Average task time", "Total tasks", "Success rate", "Failed tasks", "Active tasks", "Total reported tokens", "Reporting coverage", "Duration", "Reported token usage"]) {
+  for (const label of ["Average task time", "Total tasks", "Success rate", "Failed tasks", "Active tasks", "Total reported tokens", "Reporting coverage", "Duration", "Reported token usage", "By repository", "By command"]) {
     assert.match(source, new RegExp(label));
   }
 });
