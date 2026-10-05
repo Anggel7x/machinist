@@ -1,0 +1,63 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Machinist Work Lifecycle",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "intake", "label": "People & GitHub" },
+    { "id": "control", "label": "Control Plane" },
+    { "id": "host", "label": "Worker Host" },
+    { "id": "github", "label": "GitHub" }
+  ],
+  "phases": [
+    { "id": "admit", "label": "Admit", "fromCol": 0, "toCol": 1 },
+    { "id": "execute", "label": "Lease + execute", "fromCol": 2, "toCol": 4, "variant": "emphasis" },
+    { "id": "land", "label": "Hand off", "fromCol": 5, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": ["issue", "scheduler", "store", "lease", "worker", "worktree", "runner", "pr", "mirror", "dashboard"],
+  "nodes": [
+    { "id": "issue", "lane": "intake", "col": 0, "type": "external", "label": "Labeled Issue", "sublabel": "machinist:requested", "width": 150 },
+    { "id": "operator", "lane": "intake", "col": 1, "type": "frontend", "label": "Web UI / CLI", "sublabel": "submit a job", "width": 140 },
+    { "id": "dashboard", "lane": "intake", "col": 5, "type": "frontend", "label": "Dashboard", "sublabel": "state + outcome", "width": 140 },
+    { "id": "scheduler", "lane": "control", "col": 0, "type": "backend", "label": "Trigger Scheduler", "sublabel": "cron + label poll", "tag": "write access only", "width": 150 },
+    { "id": "store", "lane": "control", "col": 1, "type": "database", "label": "Job Store", "sublabel": "one job, one run", "width": 140 },
+    { "id": "lease", "lane": "control", "col": 2, "type": "security", "label": "Lease", "sublabel": "repository ceiling", "width": 140 },
+    { "id": "mirror", "lane": "control", "col": 5, "type": "backend", "label": "GitHub Mirror", "sublabel": "derive outcome", "width": 140 },
+    { "id": "worker", "lane": "host", "col": 2, "type": "backend", "label": "Worker", "sublabel": "poll + heartbeat", "width": 140 },
+    { "id": "worktree", "lane": "host", "col": 3, "type": "database", "label": "Worktree", "sublabel": "reset to head", "width": 140 },
+    { "id": "runner", "lane": "host", "col": 4, "type": "messagebus", "label": "Runner", "sublabel": "executor via stdin", "tag": "Codex / Claude Code", "width": 150 },
+    { "id": "pr", "lane": "github", "col": 5, "type": "external", "label": "Pull Request", "sublabel": "human gate", "width": 140 }
+  ],
+  "edges": [
+    { "id": "issue-scheduler", "from": "issue", "to": "scheduler", "label": "requested" },
+    { "id": "operator-store", "from": "operator", "to": "store", "label": "POST /jobs", "role": "branch" },
+    { "id": "scheduler-store", "from": "scheduler", "to": "store", "label": "admit", "variant": "emphasis" },
+    { "id": "store-lease", "from": "store", "to": "lease", "label": "queued" },
+    { "id": "lease-worker", "from": "lease", "to": "worker", "label": "RunSpec", "variant": "emphasis" },
+    { "id": "worker-worktree", "from": "worker", "to": "worktree" },
+    { "id": "worktree-runner", "from": "worktree", "to": "runner", "label": "prompt" },
+    { "id": "runner-pr", "from": "runner", "to": "pr", "label": "opens PR" },
+    { "id": "pr-mirror", "from": "pr", "to": "mirror", "label": "mirrored", "role": "async", "variant": "dashed" },
+    { "id": "mirror-dashboard", "from": "mirror", "to": "dashboard" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "State vs. outcome",
+      "items": [
+        "State comes only from the process exit code",
+        "Outcome comes from the mirrored pull request"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Local authority",
+      "items": [
+        "Workers resolve only their own executors and checkouts",
+        "Machinist never merges; a person decides what ships"
+      ]
+    }
+  ]
+}

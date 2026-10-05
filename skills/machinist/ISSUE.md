@@ -10,7 +10,7 @@ it leaves vague, the planner fills in or escalates to `machinist:needs-human`.
 - **One outcome.** A request holding two observable outcomes becomes two issues.
 - **Decide first.** When the request leaves a material product or technical choice open,
   ask the user now. An open choice in the issue stops the run at `machinist:needs-human`.
-- **Speak the glossary.** When the repository has a `CONTEXT.md`, use its terms and
+- **Speak the glossary.** When the repository has a `GLOSSARY.md`, use its terms and
   none of the words it lists under _Avoid_.
 
 ## Shape
