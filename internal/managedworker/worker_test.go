@@ -219,6 +219,40 @@ func TestManagedWorkerRequiresHTTPSForRemoteControlPlane(t *testing.T) {
 	}
 }
 
+func TestManagedWorkerOffersRegisteredRepositoriesUnlessListed(t *testing.T) {
+	for _, mode := range []string{config.ServeRegisteredRepositories, config.ServeListedRepositories} {
+		requests := make(chan protocol.PollRequest, 1)
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			var poll protocol.PollRequest
+			_ = json.NewDecoder(request.Body).Decode(&poll)
+			requests <- poll
+			_, _ = io.WriteString(response, "{}")
+		}))
+		tokenPath := filepath.Join(t.TempDir(), "token")
+		if err := os.WriteFile(tokenPath, []byte("secret\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		worker, err := New(config.Worker{
+			Name:              "local",
+			ServeRepositories: mode,
+			ControlPlane:      config.ControlPlane{URL: server.URL, TokenFile: tokenPath},
+			Executors:         map[string]config.Executor{"test": {Command: []string{"agent"}}},
+			Repositories:      map[string]config.Repository{"machinist": {Path: "."}},
+		}, io.Discard, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := worker.poll(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		server.Close()
+		poll := <-requests
+		if poll.ServeRegistered != (mode == config.ServeRegisteredRepositories) || len(poll.Repositories) != 1 || poll.Repositories[0] != "machinist" {
+			t.Fatalf("%s poll = %#v", mode, poll)
+		}
+	}
+}
+
 func TestCompletionDoesNotRetryPermanentClientError(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {

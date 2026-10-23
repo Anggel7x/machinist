@@ -80,6 +80,32 @@ func TestLoadWorkerRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestLoadWorkerServesRegisteredRepositoriesUnlessListed(t *testing.T) {
+	for _, test := range []struct {
+		body       string
+		registered bool
+		err        string
+	}{
+		{body: "", registered: true},
+		{body: "serve_repositories = \"registered\"\n", registered: true},
+		{body: "serve_repositories = \"listed\"\n", registered: false},
+		{body: "serve_repositories = \"all\"\n", err: "serve_repositories must be"},
+	} {
+		path := filepath.Join(t.TempDir(), "worker.toml")
+		writeTestFile(t, path, "name = \"local\"\n"+test.body)
+		worker, err := LoadWorker(path)
+		if test.err != "" {
+			if err == nil || !strings.Contains(err.Error(), test.err) {
+				t.Fatalf("%q: error = %v", test.body, err)
+			}
+			continue
+		}
+		if err != nil || worker.ServesRegistered() != test.registered {
+			t.Fatalf("%q: serves registered = %v, error = %v", test.body, worker.ServesRegistered(), err)
+		}
+	}
+}
+
 func TestLoadManagedWorkerResolvesMachineConfiguration(t *testing.T) {
 	directory := t.TempDir()
 	writeTestFile(t, filepath.Join(directory, "token"), "secret\n")
@@ -655,6 +681,36 @@ func TestShippedMachinistSkillDescribesGitHubIntake(t *testing.T) {
 	}
 }
 
+func TestShippedIssueGuidanceMatchesForemanPlanningSections(t *testing.T) {
+	foreman, err := os.ReadFile(filepath.Join("..", "..", "examples", "prompts", "foreman.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := strings.Join(strings.Fields(string(foreman)), " ")
+	_, after, found := strings.Cut(prompt, "specification using exactly: ")
+	if !found {
+		t.Fatal("foreman prompt no longer names its planning sections")
+	}
+	list, _, _ := strings.Cut(after, ".")
+	var sections []string
+	for _, section := range strings.Split(strings.Replace(list, ", and ", ", ", 1), ", ") {
+		sections = append(sections, "- **"+section+"**:")
+	}
+
+	guidance, err := os.ReadFile(filepath.Join("..", "..", "skills", "machinist", "ISSUE.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	position := 0
+	for _, section := range sections {
+		index := strings.Index(string(guidance)[position:], section)
+		if index < 0 {
+			t.Fatalf("ISSUE.md does not list %q after the previous section", section)
+		}
+		position += index
+	}
+}
+
 func writeTestFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -670,5 +726,113 @@ func TestLoadConfigRejectsRemovedShepherdSchedules(t *testing.T) {
 	_, err := LoadDefinitions(path)
 	if err == nil || !strings.Contains(err.Error(), "shepherd schedules were removed") {
 		t.Fatalf("error = %v, want removed shepherd schedule guidance", err)
+	}
+}
+
+func TestRepositoryPolicyCarriesSlugAndCeilingAndFallsBackToGitHubMap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeTestFile(t, path, "[server]\nworker_token_file = \"token\"\n\n[repositories.tac-restaurant]\nslug = \"anggel7x/tac_restaurant\"\nparallel = 3\n\n[github.repositories]\nmachinist = \"owainlewis/machinist\"\n")
+
+	definition, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slugs, err := definition.RepositorySlugs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slugs["tac-restaurant"] != "anggel7x/tac_restaurant" || slugs["machinist"] != "owainlewis/machinist" {
+		t.Fatalf("slugs = %v", slugs)
+	}
+	ceilings, err := definition.RepositoryCeilings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ceilings["tac-restaurant"] != 3 {
+		t.Fatalf("ceiling = %d, want 3", ceilings["tac-restaurant"])
+	}
+	if _, declared := ceilings["machinist"]; declared {
+		t.Fatalf("ceilings = %v, want no entry for an undeclared repository", ceilings)
+	}
+}
+
+func TestLoadConfigRejectsInvalidRepositoryPolicy(t *testing.T) {
+	for name, body := range map[string]string{
+		"non-positive ceiling": "[server]\nworker_token_file = \"token\"\n\n[repositories.tac]\nslug = \"o/r\"\nparallel = 0\n",
+		"missing slug":         "[server]\nworker_token_file = \"token\"\n\n[repositories.tac]\nparallel = 2\n",
+		"conflicting slug":     "[server]\nworker_token_file = \"token\"\n\n[repositories.tac]\nslug = \"o/one\"\n\n[github.repositories]\ntac = \"o/two\"\n",
+		"unsafe slug":          "[server]\nworker_token_file = \"token\"\n\n[repositories.tac]\nslug = \"../escape\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeTestFile(t, path, body)
+			if _, err := LoadConfig(path); err == nil {
+				t.Fatal("expected load to reject the repository policy")
+			}
+		})
+	}
+}
+
+func TestLoadConfigKeepsRepositoryWithoutCeiling(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeTestFile(t, path, "[server]\nworker_token_file = \"token\"\n\n[repositories.tac]\nslug = \"o/r\"\n")
+
+	definition, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ceilings, err := definition.RepositoryCeilings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ceilings) != 0 {
+		t.Fatalf("ceilings = %v, want empty", ceilings)
+	}
+}
+
+func TestWorkerPoolSizeDefaultsToOneAndMustBePositive(t *testing.T) {
+	directory := t.TempDir()
+	plain := filepath.Join(directory, "worker.toml")
+	writeTestFile(t, plain, "data_directory = \"state\"\n")
+	worker, err := LoadWorker(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.PoolSize() != 1 {
+		t.Fatalf("pool size = %d, want 1", worker.PoolSize())
+	}
+
+	pooled := filepath.Join(directory, "pooled.toml")
+	writeTestFile(t, pooled, "data_directory = \"state\"\nmax_workers = 3\n")
+	worker, err = LoadWorker(pooled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.PoolSize() != 3 {
+		t.Fatalf("pool size = %d, want 3", worker.PoolSize())
+	}
+
+	invalid := filepath.Join(directory, "invalid.toml")
+	writeTestFile(t, invalid, "data_directory = \"state\"\nmax_workers = 0\n")
+	if _, err := LoadWorker(invalid); err == nil {
+		t.Fatal("expected load to reject a non-positive host cap")
+	}
+}
+
+func TestWorkerRepositoryWithoutPathDeclaresWillingnessWithoutACheckout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.toml")
+	writeTestFile(t, path, "data_directory = \"state\"\n\n[repositories.tac-restaurant]\n")
+
+	worker, err := LoadWorker(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The host still advertises the repository, so the control plane may
+	// dispatch to it; the worker materialises the checkout on first use.
+	if names := worker.RepositoryNames(); len(names) != 1 || names[0] != "tac-restaurant" {
+		t.Fatalf("repository names = %v", names)
+	}
+	if resolved, err := worker.ResolveRepository("tac-restaurant"); err == nil {
+		t.Fatalf("resolved = %q, want an error saying there is no checkout", resolved)
 	}
 }

@@ -3,11 +3,15 @@ package protocol
 import "encoding/json"
 
 type PollRequest struct {
-	InstanceID   string              `json:"instance_id"`
-	Name         string              `json:"name"`
-	Executors    []string            `json:"executors"`
-	Repositories []string            `json:"repositories"`
-	Models       map[string][]string `json:"models,omitempty"`
+	InstanceID   string   `json:"instance_id"`
+	Name         string   `json:"name"`
+	Host         string   `json:"host,omitempty"`
+	Executors    []string `json:"executors"`
+	Repositories []string `json:"repositories"`
+	// ServeRegistered offers every repository registered on the control
+	// plane in addition to Repositories, which then only name local checkouts.
+	ServeRegistered bool                `json:"serve_registered,omitempty"`
+	Models          map[string][]string `json:"models,omitempty"`
 }
 
 type PollResponse struct {
@@ -22,6 +26,7 @@ type RunSpec struct {
 	Executor       string `json:"executor"`
 	Model          string `json:"model,omitempty"`
 	Repository     string `json:"repository"`
+	RepositorySlug string `json:"repository_slug,omitempty"`
 	RenderedPrompt string `json:"rendered_prompt"`
 	TimeoutMillis  int64  `json:"timeout_millis"`
 	LeaseToken     string `json:"lease_token"`

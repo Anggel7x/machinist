@@ -29,6 +29,7 @@ type commandOptions struct {
 	stderr              io.Writer
 	version             string
 	listen              string
+	workerName          string
 }
 
 func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, version string) int {
@@ -68,6 +69,7 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 	root.AddCommand(newRunCommand(options))
 	root.AddCommand(newSubmitCommand(options))
 	root.AddCommand(newStartCommand(options))
+	root.AddCommand(newRepoCommand(options))
 	root.AddCommand(newUpdateCommand(options))
 
 	worker := &cobra.Command{Use: "worker", Short: "Run or connect a Machinist Worker"}
@@ -235,24 +237,48 @@ func newStartCommand(options *commandOptions) *cobra.Command {
 	return start
 }
 
+// newWorkerStartCommand starts this host's workers. It is a supervisor when
+// the host declares max_workers above one, and the worker itself otherwise, so
+// there is exactly one way to run a worker host: a `worker start` that quietly
+// serves a single worker would leave a pooled host silently under capacity.
 func newWorkerStartCommand(options *commandOptions) *cobra.Command {
-	return &cobra.Command{
+	start := &cobra.Command{
 		Use:   "start",
-		Short: "Start a managed Machinist Worker",
+		Short: "Start this machine's managed Machinist Workers",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			workerConfig, err := config.LoadWorker(options.configPath)
 			if err != nil {
 				return err
 			}
-			worker, err := managedworker.New(workerConfig, options.stdout, options.stderr)
-			if err != nil {
-				return err
+			if name := strings.TrimSpace(options.workerName); name != "" {
+				workerConfig.Name = name
+				return runManagedWorker(command.Context(), options, workerConfig)
 			}
-			fmt.Fprintf(options.stderr, "machinist: worker %s connecting to %s\n", workerConfig.Name, workerConfig.ControlPlane.URL)
-			return worker.Run(command.Context())
+			names := poolWorkerNames(workerConfig.Name, workerConfig.PoolSize())
+			if len(names) == 1 {
+				return runManagedWorker(command.Context(), options, workerConfig)
+			}
+			fmt.Fprintf(options.stderr, "machinist: worker pool %v connecting to %s\n", names, workerConfig.ControlPlane.URL)
+			return supervisePool(command.Context(), names, poolRestartBackoff, func(ctx context.Context, name string) error {
+				return startPoolWorker(ctx, options.configPath, name, options.stdout, options.stderr)
+			}, options.stderr)
 		},
 	}
+	// The pool re-executes this command with a fixed name for each of its
+	// children. It is not part of the documented surface.
+	start.Flags().StringVar(&options.workerName, "worker-name", "", "run exactly this one worker (used by the pool)")
+	_ = start.Flags().MarkHidden("worker-name")
+	return start
+}
+
+func runManagedWorker(ctx context.Context, options *commandOptions, workerConfig config.Worker) error {
+	worker, err := managedworker.New(workerConfig, options.stdout, options.stderr)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(options.stderr, "machinist: worker %s connecting to %s\n", workerConfig.Name, workerConfig.ControlPlane.URL)
+	return worker.Run(ctx)
 }
 
 func newRunCommand(options *commandOptions) *cobra.Command {

@@ -80,7 +80,7 @@ func waitForRequestedLabel(t *testing.T, ctx context.Context, adapter *GitHubCLI
 func assertDisposableIntake(t *testing.T, ctx context.Context, adapter *GitHubCLI, repository, issueURL, wantActor string) {
 	t.Helper()
 	number := integrationIssueNumber(t, issueURL)
-	candidates, err := adapter.SearchRequestedIssues(ctx, []string{repository}, "machinist:requested", maxGitHubCandidates)
+	candidates, err := adapter.SearchRequestedIssues(ctx, []string{repository}, "machinist:requested", "issue", maxGitHubCandidates)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func assertDisposableIntake(t *testing.T, ctx context.Context, adapter *GitHubCL
 	if !GitHubPermissionCanWrite(permission) {
 		t.Fatalf("label actor %q has permission %q", details.RequestedEvent.Actor, permission)
 	}
-	if err := adapter.AcknowledgeRequest(ctx, repository, number, "machinist:requested", "machinist:queued", true); err != nil {
+	if err := adapter.AcknowledgeRequest(ctx, repository, number, "issue", "machinist:requested", "machinist:queued", true); err != nil {
 		t.Fatal(err)
 	}
 	details, err = adapter.IssueDetails(ctx, repository, number, "machinist:requested")

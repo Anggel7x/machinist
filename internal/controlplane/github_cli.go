@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/owainlewis/machinist/internal/config"
 )
 
 const (
@@ -119,10 +121,11 @@ func (e *GitHubCLIError) Error() string {
 
 func (e *GitHubCLIError) Unwrap() error { return e.Err }
 
-// SearchRequestedIssues returns at most the 100 oldest matching issues across
-// all configured repositories. Repositories are sorted and combined into one
-// gh search whenever the process argument limit permits it.
-func (g *GitHubCLI) SearchRequestedIssues(ctx context.Context, repositories []string, label string, limit int) ([]GitHubCandidate, error) {
+// SearchRequestedIssues returns at most the 100 oldest matching issues, or
+// pull requests when subject is config.GitHubPullRequestSubject, across all
+// configured repositories. Repositories are sorted and combined into one gh
+// search whenever the process argument limit permits it.
+func (g *GitHubCLI) SearchRequestedIssues(ctx context.Context, repositories []string, label, subject string, limit int) ([]GitHubCandidate, error) {
 	repositories, err := normalizeGitHubRepositories(repositories)
 	if err != nil {
 		return nil, err
@@ -137,8 +140,12 @@ func (g *GitHubCLI) SearchRequestedIssues(ctx context.Context, repositories []st
 		limit = maxGitHubCandidates
 	}
 
+	kind, operation := "issues", "search issues"
+	if subject == config.GitHubPullRequestSubject {
+		kind, operation = "prs", "search pull requests"
+	}
 	baseArgs := []string{
-		"search", "issues", "--label", label,
+		"search", kind, "--label", label,
 		"--state", "open",
 		"--sort", "created", "--order", "asc", "--limit", strconv.Itoa(maxGitHubCandidates),
 		"--json", "number,repository,state,url,isPullRequest,createdAt",
@@ -150,13 +157,13 @@ func (g *GitHubCLI) SearchRequestedIssues(ctx context.Context, repositories []st
 		for _, repository := range batch {
 			args = append(args, "--repo", repository)
 		}
-		stdout, err := g.run(ctx, "search issues", args)
+		stdout, err := g.run(ctx, operation, args)
 		if err != nil {
 			return nil, err
 		}
 		candidates, err := parseGitHubCandidates(stdout)
 		if err != nil {
-			return nil, malformedGitHubOutput("search issues", err, stdout)
+			return nil, malformedGitHubOutput(operation, err, stdout)
 		}
 		all = append(all, candidates...)
 	}
@@ -268,7 +275,7 @@ func GitHubPermissionCanWrite(permission string) bool {
 // AcknowledgeRequest removes the request label after durable intake. Accepted
 // requests receive the queued lifecycle label first. The scheduler owns durable
 // reconciliation and re-reads the timeline after this mutation.
-func (g *GitHubCLI) AcknowledgeRequest(ctx context.Context, repository string, number int, requestedLabel, queuedLabel string, accepted bool) error {
+func (g *GitHubCLI) AcknowledgeRequest(ctx context.Context, repository string, number int, subject, requestedLabel, queuedLabel string, accepted bool) error {
 	repository, err := normalizeGitHubRepository(repository)
 	if err != nil {
 		return err
@@ -285,21 +292,35 @@ func (g *GitHubCLI) AcknowledgeRequest(ctx context.Context, repository string, n
 	if strings.EqualFold(requestedLabel, queuedLabel) {
 		return errors.New("requested and queued labels must differ")
 	}
-	issueURL := fmt.Sprintf("https://github.com/%s/issues/%d", repository, number)
+	kind := "issue"
+	if subject == config.GitHubPullRequestSubject {
+		kind = "pr"
+	}
+	subjectURL := GitHubSubjectURL(repository, number, subject)
 	if accepted {
-		if _, err := g.run(ctx, "add queued label", []string{"issue", "edit", issueURL, "--add-label", queuedLabel}); err != nil {
+		if _, err := g.run(ctx, "add queued label", []string{kind, "edit", subjectURL, "--add-label", queuedLabel}); err != nil {
 			return err
 		}
 	}
-	if _, err := g.run(ctx, "remove request label", []string{"issue", "edit", issueURL, "--remove-label", requestedLabel}); err != nil {
+	if _, err := g.run(ctx, "remove request label", []string{kind, "edit", subjectURL, "--remove-label", requestedLabel}); err != nil {
 		return err
 	}
 	return nil
 }
 
-// GitHubIssueIsEligible applies local intake guards before admission.
-func GitHubIssueIsEligible(issue GitHubIssueDetails, configuredRepositories []string) bool {
-	if !strings.EqualFold(issue.State, "open") || issue.IsPullRequest || issue.RequestedEvent == nil {
+// GitHubSubjectURL is the web URL of an issue, or of a pull request when
+// subject is config.GitHubPullRequestSubject.
+func GitHubSubjectURL(repository string, number int, subject string) string {
+	if subject == config.GitHubPullRequestSubject {
+		return fmt.Sprintf("https://github.com/%s/pull/%d", repository, number)
+	}
+	return fmt.Sprintf("https://github.com/%s/issues/%d", repository, number)
+}
+
+// GitHubIssueIsEligible applies local intake guards before admission. The
+// labelled item must be the kind the trigger watches.
+func GitHubIssueIsEligible(issue GitHubIssueDetails, configuredRepositories []string, subject string) bool {
+	if !strings.EqualFold(issue.State, "open") || issue.IsPullRequest != (subject == config.GitHubPullRequestSubject) || issue.RequestedEvent == nil {
 		return false
 	}
 	for _, repository := range configuredRepositories {
@@ -633,4 +654,240 @@ func decodeSingleJSON(output []byte, target any) error {
 		return err
 	}
 	return nil
+}
+
+// pullRequestFields is one call's worth of everything the mirror caches.
+// closingIssuesReferences comes back with the pull request, so one list per
+// repository resolves issues to pull requests without a call per job.
+//
+// `commits` must not be added back. It is a connection, not a scalar, so
+// requesting it for a page of pull requests asks GitHub for every commit and
+// every commit's authors at once; GitHub rejects the whole query on cost
+// ("exceeds the maximum limit of 500,000 nodes") and the repository mirrors
+// nothing at all. Change size is carried by additions, deletions and
+// changedFiles, which are scalars.
+const pullRequestFields = "number,url,title,state,isDraft,mergeable,mergeStateStatus,reviewDecision,mergedAt," +
+	"headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,closingIssuesReferences," +
+	"statusCheckRollup,createdAt,updatedAt"
+
+const issueFields = "number,url,state,labels,updatedAt"
+
+type githubPullRequestPayload struct {
+	Number           int    `json:"number"`
+	URL              string `json:"url"`
+	Title            string `json:"title"`
+	State            string `json:"state"`
+	IsDraft          bool   `json:"isDraft"`
+	Mergeable        string `json:"mergeable"`
+	MergeStateStatus string `json:"mergeStateStatus"`
+	ReviewDecision   string `json:"reviewDecision"`
+	MergedAt         string `json:"mergedAt"`
+	HeadRefName      string `json:"headRefName"`
+	HeadRefOID       string `json:"headRefOid"`
+	BaseRefName      string `json:"baseRefName"`
+	Additions        int    `json:"additions"`
+	Deletions        int    `json:"deletions"`
+	ChangedFiles     int    `json:"changedFiles"`
+	CreatedAt        string `json:"createdAt"`
+	UpdatedAt        string `json:"updatedAt"`
+	Commits          []struct {
+		OID string `json:"oid"`
+	} `json:"commits"`
+	ClosingIssuesReferences []struct {
+		Number int `json:"number"`
+	} `json:"closingIssuesReferences"`
+	StatusCheckRollup []struct {
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+		State      string `json:"state"`
+	} `json:"statusCheckRollup"`
+}
+
+type githubIssuePayload struct {
+	Number    int    `json:"number"`
+	URL       string `json:"url"`
+	State     string `json:"state"`
+	UpdatedAt string `json:"updatedAt"`
+	Labels    []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
+// ListPullRequests mirrors one repository's pull requests. It reads only: the
+// control plane never comments, reviews or merges, so nothing here can change
+// what a repository's own policy workflow decides.
+func (g *GitHubCLI) ListPullRequests(ctx context.Context, repository string, limit int) ([]PullRequestMirror, error) {
+	repository, err := normalizeGitHubRepository(repository)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > maxGitHubCandidates {
+		limit = maxGitHubCandidates
+	}
+	// Two reads, because one bounded read cannot do both jobs. "open" is
+	// everything whose outcome can still change, and must be tracked however
+	// old it is; "all" is the recent window, which is how a pull request's
+	// transition to merged or closed is noticed. Terminal rows are then sticky,
+	// since the mirror upserts and never deletes.
+	var payload []githubPullRequestPayload
+	for _, state := range []string{"open", "all"} {
+		args := []string{"pr", "list", "--repo", repository, "--state", state, "--limit", strconv.Itoa(limit), "--json", pullRequestFields}
+		stdout, err := g.run(ctx, "list pull requests", args)
+		if err != nil {
+			return nil, err
+		}
+		var page []githubPullRequestPayload
+		if err := json.Unmarshal(stdout, &page); err != nil {
+			return nil, malformedGitHubOutput("list pull requests", err, stdout)
+		}
+		payload = append(payload, page...)
+	}
+	mirrors := make([]PullRequestMirror, 0, len(payload))
+	seen := make(map[int]bool, len(payload))
+	for _, entry := range payload {
+		if entry.Number <= 0 || seen[entry.Number] {
+			continue
+		}
+		seen[entry.Number] = true
+		mirror := PullRequestMirror{
+			Repository:       repository,
+			Number:           entry.Number,
+			URL:              entry.URL,
+			Title:            entry.Title,
+			State:            strings.ToLower(strings.TrimSpace(entry.State)),
+			IsDraft:          entry.IsDraft,
+			Mergeable:        strings.EqualFold(entry.Mergeable, "MERGEABLE"),
+			MergeStateStatus: strings.ToUpper(strings.TrimSpace(entry.MergeStateStatus)),
+			ReviewDecision:   strings.ToUpper(strings.TrimSpace(entry.ReviewDecision)),
+			MergedAt:         parseGitHubTime(entry.MergedAt),
+			HeadRefName:      entry.HeadRefName,
+			HeadRefOID:       entry.HeadRefOID,
+			BaseRefName:      entry.BaseRefName,
+			Additions:        entry.Additions,
+			Deletions:        entry.Deletions,
+			ChangedFiles:     entry.ChangedFiles,
+			CreatedAt:        parseGitHubTime(entry.CreatedAt),
+			UpdatedAt:        parseGitHubTime(entry.UpdatedAt),
+		}
+		for _, check := range entry.StatusCheckRollup {
+			switch {
+			case isPendingGitHubCheck(check.Status, check.State):
+				mirror.ChecksPending++
+			case isFailedGitHubCheck(check.Conclusion, check.State):
+				mirror.ChecksFailed++
+			default:
+				mirror.ChecksPassed++
+			}
+		}
+		mirror.ChecksState = rollUpGitHubChecks(mirror.ChecksPassed, mirror.ChecksFailed, mirror.ChecksPending)
+		if len(entry.ClosingIssuesReferences) > 0 {
+			mirror.IssueNumber = entry.ClosingIssuesReferences[0].Number
+		}
+		mirrors = append(mirrors, mirror)
+	}
+	return mirrors, nil
+}
+
+// PullRequestDiff reads a pull request's unified diff as GitHub currently
+// reports it. Like the mirror, it only reads.
+func (g *GitHubCLI) PullRequestDiff(ctx context.Context, repository string, number int) (string, error) {
+	repository, err := normalizeGitHubRepository(repository)
+	if err != nil {
+		return "", err
+	}
+	if number <= 0 {
+		return "", errors.New("github pull request number must be positive")
+	}
+	stdout, err := g.run(ctx, "read pull request diff", []string{"pr", "diff", strconv.Itoa(number), "--repo", repository})
+	if err != nil {
+		return "", err
+	}
+	return string(stdout), nil
+}
+
+// ListIssues mirrors one repository's recent issues so the dashboard can show
+// live ticket state and labels. The limit bounds it to the active window;
+// issues outside that window keep whatever was last mirrored.
+func (g *GitHubCLI) ListIssues(ctx context.Context, repository string, limit int) ([]IssueMirror, error) {
+	repository, err := normalizeGitHubRepository(repository)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > maxGitHubCandidates {
+		limit = maxGitHubCandidates
+	}
+	args := []string{"issue", "list", "--repo", repository, "--state", "all", "--limit", strconv.Itoa(limit), "--json", issueFields}
+	stdout, err := g.run(ctx, "list issues", args)
+	if err != nil {
+		return nil, err
+	}
+	var payload []githubIssuePayload
+	if err := json.Unmarshal(stdout, &payload); err != nil {
+		return nil, malformedGitHubOutput("list issues", err, stdout)
+	}
+	mirrors := make([]IssueMirror, 0, len(payload))
+	for _, entry := range payload {
+		if entry.Number <= 0 {
+			continue
+		}
+		labels := make([]string, 0, len(entry.Labels))
+		for _, label := range entry.Labels {
+			if name := strings.TrimSpace(label.Name); name != "" {
+				labels = append(labels, name)
+			}
+		}
+		mirrors = append(mirrors, IssueMirror{
+			Repository: repository,
+			Number:     entry.Number,
+			URL:        entry.URL,
+			State:      strings.ToLower(strings.TrimSpace(entry.State)),
+			Labels:     labels,
+			UpdatedAt:  parseGitHubTime(entry.UpdatedAt),
+		})
+	}
+	return mirrors, nil
+}
+
+func isPendingGitHubCheck(status, state string) bool {
+	if status != "" && !strings.EqualFold(status, "COMPLETED") {
+		return true
+	}
+	return strings.EqualFold(state, "PENDING") || strings.EqualFold(state, "EXPECTED")
+}
+
+func isFailedGitHubCheck(conclusion, state string) bool {
+	switch strings.ToUpper(strings.TrimSpace(conclusion)) {
+	case "FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE":
+		return true
+	}
+	switch strings.ToUpper(strings.TrimSpace(state)) {
+	case "FAILURE", "ERROR":
+		return true
+	}
+	return false
+}
+
+func rollUpGitHubChecks(passed, failed, pending int) string {
+	switch {
+	case failed > 0:
+		return ChecksFailing
+	case pending > 0:
+		return ChecksPending
+	case passed > 0:
+		return ChecksPassing
+	default:
+		return ChecksNone
+	}
+}
+
+func parseGitHubTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "null" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed.UTC()
 }

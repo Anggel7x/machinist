@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -16,25 +17,32 @@ import (
 )
 
 type fakeGitHubTriggerClient struct {
-	candidates       []GitHubCandidate
-	details          GitHubIssueDetails
-	detailsByNumber  map[int]GitHubIssueDetails
-	detailsSequence  []GitHubIssueDetails
-	detailsErrors    map[int]error
-	detailsCalls     int
-	permission       string
-	permissions      map[string]string
-	searchErr        error
-	searchStarted    chan<- struct{}
-	searchRelease    <-chan struct{}
-	honorLimit       bool
-	replaceErr       error
-	replaceCalls     int
-	permissionActor  string
-	permissionActors []string
+	pullRequests       map[string][]PullRequestMirror
+	issues             map[string][]IssueMirror
+	listedRepositories []string
+	listErr            error
+	candidates         []GitHubCandidate
+	details            GitHubIssueDetails
+	detailsByNumber    map[int]GitHubIssueDetails
+	detailsSequence    []GitHubIssueDetails
+	detailsErrors      map[int]error
+	detailsCalls       int
+	permission         string
+	permissions        map[string]string
+	searchErr          error
+	searchStarted      chan<- struct{}
+	searchRelease      <-chan struct{}
+	honorLimit         bool
+	replaceErr         error
+	replaceCalls       int
+	permissionActor    string
+	permissionActors   []string
+	diff               string
+	diffErr            error
+	diffCalls          []string
 }
 
-func (f *fakeGitHubTriggerClient) SearchRequestedIssues(ctx context.Context, _ []string, label string, limit int) ([]GitHubCandidate, error) {
+func (f *fakeGitHubTriggerClient) SearchRequestedIssues(ctx context.Context, _ []string, label, _ string, limit int) ([]GitHubCandidate, error) {
 	if f.searchStarted != nil {
 		select {
 		case f.searchStarted <- struct{}{}:
@@ -64,6 +72,26 @@ func (f *fakeGitHubTriggerClient) SearchRequestedIssues(ctx context.Context, _ [
 	return candidates, nil
 }
 
+func (f *fakeGitHubTriggerClient) ListPullRequests(_ context.Context, repository string, _ int) ([]PullRequestMirror, error) {
+	f.listedRepositories = append(f.listedRepositories, repository)
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.pullRequests[repository], nil
+}
+
+func (f *fakeGitHubTriggerClient) ListIssues(_ context.Context, repository string, _ int) ([]IssueMirror, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.issues[repository], nil
+}
+
+func (f *fakeGitHubTriggerClient) PullRequestDiff(_ context.Context, repository string, number int) (string, error) {
+	f.diffCalls = append(f.diffCalls, fmt.Sprintf("%s#%d", repository, number))
+	return f.diff, f.diffErr
+}
+
 func (f *fakeGitHubTriggerClient) IssueDetails(_ context.Context, _ string, number int, _ string) (GitHubIssueDetails, error) {
 	call := f.detailsCalls
 	f.detailsCalls++
@@ -91,7 +119,7 @@ func (f *fakeGitHubTriggerClient) Permission(_ context.Context, _, actor string)
 	return f.permission, nil
 }
 
-func (f *fakeGitHubTriggerClient) AcknowledgeRequest(_ context.Context, _ string, number int, requestedLabel, queuedLabel string, accepted bool) error {
+func (f *fakeGitHubTriggerClient) AcknowledgeRequest(_ context.Context, _ string, number int, _, requestedLabel, queuedLabel string, accepted bool) error {
 	f.replaceCalls++
 	if f.replaceErr != nil {
 		return f.replaceErr
@@ -705,4 +733,77 @@ func processManagedTriggers(ctx context.Context, server *Server) error {
 		}
 	}
 	return errors.Join(failures...)
+}
+
+func TestMirrorGitHubOutcomesCachesEveryRegisteredRepository(t *testing.T) {
+	clock := time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC)
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	client := &fakeGitHubTriggerClient{
+		pullRequests: map[string][]PullRequestMirror{
+			"owainlewis/machinist": {{Number: 48, IssueNumber: 396, State: "open", ChecksState: ChecksPassing, MergeStateStatus: "BLOCKED", UpdatedAt: clock.Add(-2 * time.Hour)}},
+			"anggel7x/tac":         {{Number: 7, IssueNumber: 12, State: "merged", MergedAt: clock.Add(-time.Hour)}},
+		},
+		issues: map[string][]IssueMirror{
+			"owainlewis/machinist": {{Number: 396, State: "open", Labels: []string{"serial"}}},
+		},
+	}
+	server := &Server{
+		store: store, github: client, now: func() time.Time { return clock },
+		repositorySlugs: map[string]string{"machinist": "owainlewis/machinist", "tac-restaurant": "anggel7x/tac"},
+	}
+
+	if err := server.mirrorGitHubOutcomes(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Repositories are visited in logical-name order: machinist, then tac-restaurant.
+	if want := []string{"owainlewis/machinist", "anggel7x/tac"}; !reflect.DeepEqual(client.listedRepositories, want) {
+		t.Fatalf("listed = %v, want %v in a stable order", client.listedRepositories, want)
+	}
+	pulls, issues, err := store.readGitHubMirror(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mirrored under the logical repository name, so a job row joins directly.
+	blocked, ok := pulls[mirrorKey{repository: "machinist", number: 396}]
+	if !ok || blocked.Number != 48 || blocked.MergeStateStatus != "BLOCKED" {
+		t.Fatalf("mirrored pull requests = %#v", pulls)
+	}
+	if landed, ok := pulls[mirrorKey{repository: "tac-restaurant", number: 12}]; !ok || landed.State != "merged" {
+		t.Fatalf("mirrored tac pull request = %#v", pulls)
+	}
+	if issue, ok := issues[mirrorKey{repository: "machinist", number: 396}]; !ok || len(issue.Labels) != 1 || issue.Labels[0] != "serial" {
+		t.Fatalf("mirrored issues = %#v", issues)
+	}
+}
+
+func TestManagedGitHubTriggerAdmitsLabelledPullRequestWithItsPrompt(t *testing.T) {
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	store := openManagedTriggerTestStore(t, &clock)
+	trigger := githubTestTrigger()
+	trigger.Identity, trigger.Label, trigger.Subject = "github/shepherd", "machinist:shepherd", config.GitHubPullRequestSubject
+	trigger.Prompt = "Shepherd this pull request with max_actions=8."
+	if err := store.SyncTriggers(t.Context(), []TriggerDefinition{{Identity: trigger.Identity, Family: trigger.Family, ConfigSignature: trigger.Signature, NextDueAt: clock}}); err != nil {
+		t.Fatal(err)
+	}
+	event := &GitHubLabelEvent{ID: "9", Actor: "owner", CreatedAt: clock, OccurrenceKey: "github.com:9"}
+	pullRequest := GitHubCandidate{Repository: "owainlewis/machinist", Number: 59, Title: "Fix checkout", URL: "https://github.com/owainlewis/machinist/pull/59", State: "open", IsPullRequest: true, CreatedAt: clock}
+	client := &fakeGitHubTriggerClient{
+		candidates: []GitHubCandidate{pullRequest},
+		details:    GitHubIssueDetails{GitHubCandidate: pullRequest, Labels: []string{"machinist:shepherd"}, RequestedEvent: event},
+		permission: "write",
+	}
+	server := &Server{store: store, triggers: []config.ResolvedTrigger{trigger}, github: client, now: func() time.Time { return clock }}
+
+	if err := processManagedTriggers(t.Context(), server); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Shepherd this pull request with max_actions=8.\n\nhttps://github.com/owainlewis/machinist/pull/59"
+	if len(snapshot.Jobs) != 1 || snapshot.Jobs[0].Prompt != want || snapshot.Jobs[0].Repository != "machinist" || snapshot.Jobs[0].TriggerSubject != "https://github.com/owainlewis/machinist/pull/59" || client.replaceCalls != 1 {
+		t.Fatalf("jobs = %#v, label replacements = %d", snapshot.Jobs, client.replaceCalls)
+	}
 }

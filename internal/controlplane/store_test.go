@@ -72,7 +72,7 @@ func TestOpenStoreReplacesLegacySchema(t *testing.T) {
 	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 || version != 2 {
+	if count != 0 || version != 3 {
 		t.Fatalf("migrated database count=%d version=%d", count, version)
 	}
 }
@@ -83,7 +83,7 @@ func TestOpenStoreRejectsNewerSchemaWithoutDeletingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('preserved'); PRAGMA user_version=3;`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('preserved'); PRAGMA user_version=4;`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -157,11 +157,11 @@ func TestStoreConcurrentJobLimitLeavesAdditionalJobsQueued(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, err := store.poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}), 1)
+	first, err := store.poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}), dispatchLimits{MaxConcurrentJobs: 1})
 	if err != nil || first == nil || first.JobID != firstJob {
 		t.Fatalf("first lease = %#v, %v", first, err)
 	}
-	blocked, err := store.poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}), 1)
+	blocked, err := store.poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}), dispatchLimits{MaxConcurrentJobs: 1})
 	if err != nil || blocked != nil {
 		t.Fatalf("poll at capacity = %#v, %v", blocked, err)
 	}
@@ -180,7 +180,7 @@ func TestStoreConcurrentJobLimitLeavesAdditionalJobsQueued(t *testing.T) {
 	if err := store.Complete(t.Context(), first.ID, protocol.Completion{InstanceID: "worker-a", LeaseToken: first.LeaseToken, State: "succeeded", ExitCode: 0}); err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}), 1)
+	second, err := store.poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}), dispatchLimits{MaxConcurrentJobs: 1})
 	if err != nil || second == nil || second.JobID != secondJob {
 		t.Fatalf("second lease = %#v, %v", second, err)
 	}
@@ -197,13 +197,13 @@ func TestStoreConcurrentJobLimitRedispatchesExpiredActiveJob(t *testing.T) {
 	if _, err := store.CreateJob(t.Context(), "queued", "machinist", "review", testAgent("review", "Queued request")); err != nil {
 		t.Fatal(err)
 	}
-	initial, err := store.poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}), 1)
+	initial, err := store.poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}), dispatchLimits{MaxConcurrentJobs: 1})
 	if err != nil || initial == nil || initial.JobID != activeJob {
 		t.Fatalf("initial lease = %#v, %v", initial, err)
 	}
 
 	clock.Advance(leaseDuration)
-	redispatched, err := store.poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}), 1)
+	redispatched, err := store.poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}), dispatchLimits{MaxConcurrentJobs: 1})
 	if err != nil || redispatched == nil || redispatched.ID != initial.ID || redispatched.LeaseToken == initial.LeaseToken {
 		t.Fatalf("redispatched lease = %#v, %v", redispatched, err)
 	}
@@ -226,7 +226,7 @@ func TestConcurrentPollsRespectGlobalJobLimit(t *testing.T) {
 		go func(instance string) {
 			defer group.Done()
 			<-start
-			run, err := store.poll(context.Background(), pollRequest(instance, []string{"codex"}, []string{"machinist"}), 1)
+			run, err := store.poll(context.Background(), pollRequest(instance, []string{"codex"}, []string{"machinist"}), dispatchLimits{MaxConcurrentJobs: 1})
 			results <- run
 			errorsChannel <- err
 		}(instance)
@@ -1140,8 +1140,8 @@ func testVersionOneUpgrade(t *testing.T, partial string) {
 	}
 	defer store.Close()
 	var version int
-	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 2 {
-		t.Fatalf("schema version = %d, %v, want 2", version, err)
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 3 {
+		t.Fatalf("schema version = %d, %v, want 3", version, err)
 	}
 	var columns int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name IN ('has_shepherd','schedule_name')`).Scan(&columns); err != nil || columns != 0 {
@@ -1183,4 +1183,158 @@ PRAGMA user_version=1;` + extra); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestPollEnforcesPerRepositoryCeilingWithoutBlockingOtherRepositories(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	firstTac, err := store.CreateJob(t.Context(), "first", "tac-restaurant", "plan", testAgent("plan", "First request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTac, err := store.CreateJob(t.Context(), "second", "tac-restaurant", "plan", testAgent("plan", "Second request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	elsewhere, err := store.CreateJob(t.Context(), "third", "machinist", "plan", testAgent("plan", "Third request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := dispatchLimits{RepositoryCeilings: map[string]int{"tac-restaurant": 1}}
+	both := []string{"machinist", "tac-restaurant"}
+
+	leased, err := store.poll(t.Context(), pollRequest("worker-a", []string{"codex"}, both), limits)
+	if err != nil || leased == nil || leased.JobID != firstTac {
+		t.Fatalf("first lease = %#v, %v", leased, err)
+	}
+
+	// The repository is at its ceiling, so a fungible worker must skip its
+	// queued run and take eligible work from another repository instead.
+	leased, err = store.poll(t.Context(), pollRequest("worker-b", []string{"codex"}, both), limits)
+	if err != nil || leased == nil || leased.JobID != elsewhere {
+		t.Fatalf("second lease = %#v, %v", leased, err)
+	}
+
+	leased, err = store.poll(t.Context(), pollRequest("worker-c", []string{"codex"}, both), limits)
+	if err != nil || leased != nil {
+		t.Fatalf("third lease = %#v, %v, want nothing while %s waits on the ceiling", leased, err, secondTac)
+	}
+}
+
+func TestSnapshotReportsOutcomeFromMirroredGitHubState(t *testing.T) {
+	clock := newTestClock(time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC))
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	store.now = clock.Now
+	if err := store.SyncTriggers(t.Context(), []TriggerDefinition{{Identity: "github/intake", Family: "github", ConfigSignature: "v1"}}); err != nil {
+		t.Fatal(err)
+	}
+	admission := TriggerAdmission{
+		Identity: "github/intake", Family: "github", ConfigSignature: "v1", ConfigGeneration: mustTriggerGeneration(t, store, "github/intake"),
+		OccurrenceKey: "github.com/event/1", Subject: "https://github.com/owainlewis/machinist/issues/396", ScheduledAt: clock.Now(),
+		Prompt: "Complete issue", Repository: "machinist", SelectionName: "foreman", Command: testAgent("foreman", "Complete issue"),
+		GitHubRepository: "owainlewis/machinist", GitHubIssueNumber: 396, RequestActor: "owner", RequestLabel: "machinist:requested",
+	}
+	trackedJob, created, err := store.CreateTriggeredJob(t.Context(), admission)
+	if err != nil || !created {
+		t.Fatalf("triggered job = %q, %v, %v", trackedJob, created, err)
+	}
+	untrackedJob, err := store.CreateJob(t.Context(), "manual", "machinist", "plan", testAgent("plan", "manual"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = store.ReplaceRepositoryMirror(t.Context(), "machinist",
+		[]PullRequestMirror{{
+			Repository: "machinist", Number: 48, IssueNumber: 396,
+			URL: "https://github.com/owainlewis/machinist/pull/48", Title: "Ticket seam",
+			State: "open", ChecksState: ChecksPassing, ChecksPassed: 7, MergeStateStatus: "BLOCKED",
+			ReviewDecision: "APPROVED", HeadRefName: "machinist/396", BaseRefName: "main",
+			Additions: 140, Deletions: 12, ChangedFiles: 6,
+			UpdatedAt: clock.Now().Add(-2 * time.Hour),
+		}},
+		[]IssueMirror{{
+			Repository: "machinist", Number: 396, URL: admission.Subject,
+			State: "open", Labels: []string{"machinist:queued", "serial"}, UpdatedAt: clock.Now(),
+		}}, clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]Job{}
+	for _, job := range snapshot.Jobs {
+		byID[job.ID] = job
+	}
+
+	tracked := byID[trackedJob]
+	if tracked.Outcome != OutcomeBlocked || !tracked.OutcomeFlagged {
+		t.Fatalf("outcome = %q flagged = %v, want %q true", tracked.Outcome, tracked.OutcomeFlagged, OutcomeBlocked)
+	}
+	if tracked.PullRequest == nil || tracked.PullRequest.Number != 48 || tracked.PullRequest.ChangedFiles != 6 {
+		t.Fatalf("pull request = %#v", tracked.PullRequest)
+	}
+	if tracked.Issue == nil || len(tracked.Issue.Labels) != 2 || tracked.Issue.Labels[1] != "serial" {
+		t.Fatalf("issue = %#v", tracked.Issue)
+	}
+
+	untracked := byID[untrackedJob]
+	if untracked.Outcome != OutcomeNone || untracked.PullRequest != nil || untracked.OutcomeFlagged {
+		t.Fatalf("untracked job = %#v", untracked)
+	}
+}
+
+func TestPollRecordsTheHostRunningEachWorker(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	request := pollRequest("worker-a", []string{"codex"}, []string{"machinist"})
+	request.Name = "build-2-1"
+	request.Host = "build-2"
+
+	if _, err := store.Poll(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Workers) != 1 || snapshot.Workers[0].Host != "build-2" {
+		t.Fatalf("workers = %#v, want the reported host", snapshot.Workers)
+	}
+}
+
+func TestOpenStoreAddsWorkerHostToAnExistingDatabase(t *testing.T) {
+	// CREATE TABLE IF NOT EXISTS cannot add a column to a table that already
+	// exists, so a column added in a later schema version needs an explicit
+	// upgrade. Every existing deployment arrives here.
+	path := filepath.Join(t.TempDir(), "machinist.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE workers (instance_id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen_at TEXT NOT NULL);
+INSERT INTO workers VALUES('worker_1','machinist-vm','2026-09-15T12:00:00Z');
+PRAGMA user_version=2;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatalf("snapshot of an upgraded database: %v", err)
+	}
+	if len(snapshot.Workers) != 1 || snapshot.Workers[0].Name != "machinist-vm" {
+		t.Fatalf("workers = %#v", snapshot.Workers)
+	}
+	if snapshot.Workers[0].Host != "" {
+		t.Fatalf("host = %q, want empty until the worker reports one", snapshot.Workers[0].Host)
+	}
 }

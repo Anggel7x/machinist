@@ -322,3 +322,94 @@ prompt="audit"
 		t.Fatal("signature did not change with schedule")
 	}
 }
+
+func TestLoadTriggersResolvesPullRequestTriggerForOneRepository(t *testing.T) {
+	directory := t.TempDir()
+	writeTestFile(t, filepath.Join(directory, "shepherd.md"), "Request: {{machinist.prompt}}\n")
+	path := filepath.Join(directory, "config.toml")
+	writeTestFile(t, path, `[commands.shepherd]
+executor = "codex"
+prompt_file = "shepherd.md"
+
+[repositories.web]
+slug = "acme/web"
+
+[repositories.api]
+slug = "acme/api"
+
+[triggers.github.intake]
+every = "1m"
+label = "machinist:requested"
+repository = "web"
+command = "shepherd"
+
+[triggers.github.shepherd-web]
+every = "1m"
+label = "machinist:shepherd"
+on = "pull_request"
+repository = "web"
+command = "shepherd"
+prompt = "Shepherd this pull request with max_actions=8."
+
+[triggers.github.intake-api]
+every = "1m"
+label = "Machinist:Requested"
+repository = "api"
+command = "shepherd"
+`)
+	triggers, err := LoadTriggers(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]ResolvedTrigger{}
+	for _, trigger := range triggers {
+		byName[trigger.Name] = trigger
+	}
+	shepherd := byName["shepherd-web"]
+	if shepherd.Subject != GitHubPullRequestSubject || shepherd.Repository != "web" || len(shepherd.GitHubRepositories) != 1 || shepherd.GitHubRepositories["web"] != "acme/web" {
+		t.Fatalf("shepherd trigger = %#v", shepherd)
+	}
+	if byName["intake"].Subject != GitHubIssueSubject || byName["intake-api"].GitHubRepositories["api"] != "acme/api" {
+		t.Fatalf("issue triggers = %#v", byName)
+	}
+	if got := GitHubRequestPrompt(shepherd.Prompt, "https://github.com/acme/web/pull/7"); got != "Shepherd this pull request with max_actions=8.\n\nhttps://github.com/acme/web/pull/7" {
+		t.Fatalf("prompt = %q", got)
+	}
+	if got := GitHubRequestPrompt("", "https://github.com/acme/web/issues/7"); got != "Complete https://github.com/acme/web/issues/7" {
+		t.Fatalf("default prompt = %q", got)
+	}
+}
+
+func TestLoadTriggersRejectsGitHubTriggersClaimingTheSameLabeledItem(t *testing.T) {
+	base := "[commands.foreman]\nexecutor = \"codex\"\n\n[repositories.web]\nslug = \"acme/web\"\n\n[repositories.api]\nslug = \"acme/api\"\n\n"
+	for _, test := range []struct{ name, triggers, want string }{
+		{name: "everywhere and one repository", triggers: "[triggers.github.all]\nevery = \"1m\"\nlabel = \"go\"\ncommand = \"foreman\"\n\n[triggers.github.web]\nevery = \"1m\"\nlabel = \"GO\"\nrepository = \"web\"\ncommand = \"foreman\"\n", want: "same case-insensitive label"},
+		{name: "unknown subject", triggers: "[triggers.github.web]\nevery = \"1m\"\nlabel = \"go\"\non = \"discussion\"\ncommand = \"foreman\"\n", want: "on must be"},
+		{name: "unregistered repository", triggers: "[triggers.github.web]\nevery = \"1m\"\nlabel = \"go\"\nrepository = \"mobile\"\ncommand = \"foreman\"\n", want: "unknown github repository"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeTestFile(t, path, base+test.triggers)
+			if _, err := LoadTriggers(path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+// Triggers written before pull request subjects existed must keep their
+// signature, or upgrading would discard their durable state.
+func TestGitHubIssueTriggerSignatureIgnoresTheDefaultSubject(t *testing.T) {
+	trigger := ResolvedTrigger{Identity: "github/intake", Family: "github", Label: "go", GitHubRepositories: map[string]string{"web": "acme/web"}}
+	withoutSubject, err := triggerSignature(trigger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger.Subject = GitHubIssueSubject
+	withIssue, _ := triggerSignature(trigger)
+	trigger.Subject = GitHubPullRequestSubject
+	withPullRequest, _ := triggerSignature(trigger)
+	if withoutSubject != withIssue || withIssue == withPullRequest {
+		t.Fatalf("signatures: none=%s issue=%s pull_request=%s", withoutSubject, withIssue, withPullRequest)
+	}
+}

@@ -14,11 +14,59 @@ import (
 
 const queuedGitHubLabel = "machinist:queued"
 
+// mirrorPageSize bounds one repository's mirror read. It is the active window:
+// anything older keeps whatever was last mirrored for it.
+const mirrorPageSize = 100
+
 type githubTriggerClient interface {
-	SearchRequestedIssues(context.Context, []string, string, int) ([]GitHubCandidate, error)
+	SearchRequestedIssues(context.Context, []string, string, string, int) ([]GitHubCandidate, error)
 	IssueDetails(context.Context, string, int, string) (GitHubIssueDetails, error)
 	Permission(context.Context, string, string) (string, error)
-	AcknowledgeRequest(context.Context, string, int, string, string, bool) error
+	AcknowledgeRequest(context.Context, string, int, string, string, string, bool) error
+	ListPullRequests(context.Context, string, int) ([]PullRequestMirror, error)
+	ListIssues(context.Context, string, int) ([]IssueMirror, error)
+	PullRequestDiff(context.Context, string, int) (string, error)
+}
+
+// mirrorGitHubOutcomes refreshes every registered repository's pull requests
+// and issues. One list call per repository resolves every tracked issue at
+// once, because closingIssuesReferences arrives with the pull request, so the
+// cost is per repository rather than per job.
+//
+// This pass only reads. Adjudicating and merging belongs to the repository's
+// own policy workflow, and nothing here writes to GitHub.
+func (s *Server) mirrorGitHubOutcomes(ctx context.Context) error {
+	slugs := s.currentSlugs()
+	if len(slugs) == 0 {
+		return nil
+	}
+	fetchedAt := s.now().UTC()
+	var failures []error
+	for _, repository := range slices.Sorted(maps.Keys(slugs)) {
+		slug := slugs[repository]
+		pulls, err := s.github.ListPullRequests(ctx, slug, mirrorPageSize)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("mirror %s pull requests: %w", slug, err))
+			continue
+		}
+		issues, err := s.github.ListIssues(ctx, slug, mirrorPageSize)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("mirror %s issues: %w", slug, err))
+			continue
+		}
+		// Rows are keyed by the logical repository name so a job joins to them
+		// directly; the GitHub slug survives in each row's URL.
+		for index := range pulls {
+			pulls[index].Repository = repository
+		}
+		for index := range issues {
+			issues[index].Repository = repository
+		}
+		if err := s.store.ReplaceRepositoryMirror(ctx, repository, pulls, issues, fetchedAt); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func (s *Server) processManagedTrigger(ctx context.Context, trigger config.ResolvedTrigger) error {
@@ -141,7 +189,7 @@ func (s *Server) processGitHubTrigger(ctx context.Context, trigger config.Resolv
 		}
 	}
 
-	candidates, searchErr := s.github.SearchRequestedIssues(ctx, repositories, trigger.Label, maxGitHubCandidates)
+	candidates, searchErr := s.github.SearchRequestedIssues(ctx, repositories, trigger.Label, trigger.Subject, maxGitHubCandidates)
 	if searchErr != nil {
 		failures = append(failures, searchErr)
 	} else {
@@ -163,17 +211,17 @@ func (s *Server) processGitHubCandidate(ctx context.Context, trigger config.Reso
 	if err != nil {
 		return err
 	}
-	if !GitHubIssueIsEligible(details, repositories) || !hasGitHubLabel(details.Labels, trigger.Label) {
+	if !GitHubIssueIsEligible(details, repositories, trigger.Subject) || !hasGitHubLabel(details.Labels, trigger.Label) {
 		return nil
 	}
 	return s.processGitHubDetails(ctx, trigger, generation, repositories, trigger.Label, details)
 }
 
 func (s *Server) processGitHubDetails(ctx context.Context, trigger config.ResolvedTrigger, generation string, repositories []string, requestLabel string, details GitHubIssueDetails) error {
-	if !GitHubIssueIsEligible(details, repositories) {
+	if !GitHubIssueIsEligible(details, repositories, trigger.Subject) {
 		return nil
 	}
-	issueURL := fmt.Sprintf("https://github.com/%s/issues/%d", details.Repository, details.Number)
+	issueURL := GitHubSubjectURL(details.Repository, details.Number, trigger.Subject)
 	request := GitHubTriggerRequest{
 		TriggerIdentity: trigger.Identity, OccurrenceKey: details.RequestedEvent.OccurrenceKey, ConfigGeneration: generation,
 		Repository: details.Repository, IssueNumber: details.Number, Subject: issueURL,
@@ -194,7 +242,7 @@ func (s *Server) processGitHubDetails(ctx context.Context, trigger config.Resolv
 	if !ok {
 		return nil
 	}
-	prompt := "Complete " + issueURL
+	prompt := config.GitHubRequestPrompt(trigger.Prompt, issueURL)
 	command, renderErr := config.RenderPrompt(trigger.Command, prompt)
 	if renderErr != nil {
 		return renderErr
@@ -236,7 +284,7 @@ func (s *Server) reconcileGitHubRequest(ctx context.Context, trigger config.Reso
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(details.State, "open") || details.IsPullRequest {
+	if !strings.EqualFold(details.State, "open") || details.IsPullRequest != (trigger.Subject == config.GitHubPullRequestSubject) {
 		return s.store.CompleteGitHubTriggerReconciliation(ctx, request.TriggerIdentity, request.OccurrenceKey, request.ConfigGeneration)
 	}
 	_, repositoryConfigured := logicalGitHubRepository(trigger.GitHubRepositories, details.Repository)
@@ -263,7 +311,7 @@ func (s *Server) reconcileGitHubRequest(ctx context.Context, trigger config.Reso
 	if !hasGitHubLabel(details.Labels, requestLabel) {
 		return s.store.CompleteGitHubTriggerReconciliation(ctx, request.TriggerIdentity, request.OccurrenceKey, request.ConfigGeneration)
 	}
-	if err := s.github.AcknowledgeRequest(ctx, request.Repository, request.IssueNumber, requestLabel, queuedGitHubLabel, request.State == "admitted"); err != nil {
+	if err := s.github.AcknowledgeRequest(ctx, request.Repository, request.IssueNumber, trigger.Subject, requestLabel, queuedGitHubLabel, request.State == "admitted"); err != nil {
 		return err
 	}
 	after, err := s.github.IssueDetails(ctx, request.Repository, request.IssueNumber, requestLabel)

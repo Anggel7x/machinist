@@ -34,8 +34,11 @@ func New(workerConfig config.Worker, stdout, stderr io.Writer) (*Worker, error) 
 	if strings.TrimSpace(workerConfig.Name) == "" {
 		return nil, errors.New("worker name is required")
 	}
-	if len(workerConfig.Executors) == 0 || len(workerConfig.Repositories) == 0 {
-		return nil, errors.New("managed worker requires at least one executor and repository")
+	if len(workerConfig.Executors) == 0 {
+		return nil, errors.New("managed worker requires at least one executor")
+	}
+	if len(workerConfig.Repositories) == 0 && !workerConfig.ServesRegistered() {
+		return nil, errors.New("managed worker with serve_repositories = \"listed\" requires at least one repository")
 	}
 	client, err := NewClient(workerConfig)
 	if err != nil {
@@ -128,11 +131,13 @@ func withHeartbeats[T any](ctx context.Context, w *Worker, spec protocol.RunSpec
 
 func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
 	request := protocol.PollRequest{
-		InstanceID:   w.instanceID,
-		Name:         w.config.Name,
-		Executors:    w.config.ExecutorNames(),
-		Repositories: w.config.RepositoryNames(),
-		Models:       w.config.ModelCapabilities(),
+		InstanceID:      w.instanceID,
+		Name:            w.config.Name,
+		Host:            w.config.Host,
+		Executors:       w.config.ExecutorNames(),
+		Repositories:    w.config.RepositoryNames(),
+		ServeRegistered: w.config.ServesRegistered(),
+		Models:          w.config.ModelCapabilities(),
 	}
 	var response protocol.PollResponse
 	if err := w.client.Post(ctx, "/api/v1/workers/poll", request, &response); err != nil {
@@ -143,7 +148,14 @@ func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
 
 func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
 	completion := protocol.Completion{InstanceID: w.instanceID, LeaseToken: spec.LeaseToken, State: "failed", ExitCode: 1}
-	repository, err := w.config.ResolveRepository(spec.Repository)
+	checkout, err := ensureCheckout(ctx, w.config, spec.Repository, githubCloneURL(spec.RepositorySlug))
+	if err != nil {
+		completion.Error = err.Error()
+		return completion
+	}
+	// Every worker executes in its own worktree, whether this host runs one or
+	// many. Keeping the two cases identical is what makes enabling a pool safe.
+	repository, err := prepareWorkerWorktree(ctx, checkout, w.config.DataDirectory, w.config.Name, spec.Repository)
 	if err != nil {
 		completion.Error = err.Error()
 		return completion

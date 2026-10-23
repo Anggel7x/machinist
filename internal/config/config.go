@@ -32,13 +32,43 @@ const (
 	legacyFactoryPrefix      = "{{factory."
 )
 
+// Values of a worker's serve_repositories.
+const (
+	ServeRegisteredRepositories = "registered"
+	ServeListedRepositories     = "listed"
+)
+
 type Worker struct {
-	Name          string                `toml:"name"`
-	DataDirectory string                `toml:"data_directory"`
-	ControlPlane  ControlPlane          `toml:"control_plane"`
-	Executors     map[string]Executor   `toml:"executors"`
-	Repositories  map[string]Repository `toml:"repositories"`
-	configDir     string
+	Name          string `toml:"name"`
+	DataDirectory string `toml:"data_directory"`
+	MaxWorkers    *int   `toml:"max_workers"`
+	// ServeRepositories is "registered" (the default) to take work for every
+	// repository the control plane registers, or "listed" to take work only
+	// for the [repositories] entries below.
+	ServeRepositories string `toml:"serve_repositories"`
+	// Host is the machine's identity in the pool, kept when a pooled worker
+	// takes a name of its own so the dashboard can group by machine without
+	// guessing at name shapes.
+	Host         string                `toml:"-"`
+	ControlPlane ControlPlane          `toml:"control_plane"`
+	Executors    map[string]Executor   `toml:"executors"`
+	Repositories map[string]Repository `toml:"repositories"`
+	configDir    string
+}
+
+// ServesRegistered reports whether this host takes work for every repository
+// the control plane registers, rather than only the ones it lists.
+func (w Worker) ServesRegistered() bool { return w.ServeRepositories != ServeListedRepositories }
+
+// PoolSize is how many workers this host is willing to run at once. It is a
+// capability of the machine, not a policy about any repository: per-repository
+// ceilings live in the control plane's config and are enforced when a run is
+// leased.
+func (w Worker) PoolSize() int {
+	if w.MaxWorkers == nil {
+		return 1
+	}
+	return *w.MaxWorkers
 }
 
 type ControlPlane struct {
@@ -68,15 +98,68 @@ type Server struct {
 }
 
 type Config struct {
-	Server   Server             `toml:"server"`
-	Commands map[string]Command `toml:"commands"`
-	GitHub   GitHub             `toml:"github"`
-	Triggers TriggerDefinitions `toml:"triggers"`
-	path     string
+	Server       Server                      `toml:"server"`
+	Commands     map[string]Command          `toml:"commands"`
+	Repositories map[string]RepositoryPolicy `toml:"repositories"`
+	GitHub       GitHub                      `toml:"github"`
+	Triggers     TriggerDefinitions          `toml:"triggers"`
+	path         string
+}
+
+// RepositoryPolicy is everything the control plane decides about one
+// repository: where it lives on GitHub, and how much work it may carry at
+// once. Both are policy about a codebase, so neither belongs in worker.toml.
+type RepositoryPolicy struct {
+	Slug     string `toml:"slug"`
+	Parallel *int   `toml:"parallel"`
 }
 
 type GitHub struct {
 	Repositories map[string]string `toml:"repositories"`
+}
+
+// RepositorySlugs resolves every registered repository to its OWNER/REPO slug.
+// [repositories] is the current surface; the older [github.repositories] map is
+// still read so existing configurations keep working, and a name may not appear
+// in both with different slugs.
+func (c Config) RepositorySlugs() (map[string]string, error) {
+	combined := make(map[string]string, len(c.Repositories)+len(c.GitHub.Repositories))
+	for _, name := range sortedMapKeys(c.Repositories) {
+		slug := strings.TrimSpace(c.Repositories[name].Slug)
+		if slug == "" {
+			return nil, fmt.Errorf("repository %q must define a slug", name)
+		}
+		combined[name] = slug
+	}
+	for _, name := range sortedMapKeys(c.GitHub.Repositories) {
+		slug := c.GitHub.Repositories[name]
+		if existing, ok := combined[name]; ok {
+			if existing != slug {
+				return nil, fmt.Errorf("repository %q is declared as %q under [repositories] and %q under [github.repositories]", name, existing, slug)
+			}
+			continue
+		}
+		combined[name] = slug
+	}
+	return resolveGitHubRepositories(combined)
+}
+
+// RepositoryCeilings resolves the declared per-repository parallelism. A
+// repository with no ceiling is absent from the result and therefore unlimited
+// beyond the control plane's max_concurrent_jobs.
+func (c Config) RepositoryCeilings() (map[string]int, error) {
+	ceilings := make(map[string]int, len(c.Repositories))
+	for _, name := range sortedMapKeys(c.Repositories) {
+		policy := c.Repositories[name]
+		if policy.Parallel == nil {
+			continue
+		}
+		if *policy.Parallel <= 0 {
+			return nil, fmt.Errorf("repository %q parallel must be positive", name)
+		}
+		ceilings[name] = *policy.Parallel
+	}
+	return ceilings, nil
 }
 
 type TriggerDefinitions struct {
@@ -94,7 +177,22 @@ type GitHubTrigger struct {
 	TriggerSelection
 	Every string `toml:"every"`
 	Label string `toml:"label"`
+	// On is what the label must be added to: "issue" (the default) or
+	// "pull_request".
+	On string `toml:"on"`
+	// Repository limits the trigger to one registered repository; empty
+	// watches every registered repository.
+	Repository string `toml:"repository"`
+	// Prompt, when set, precedes the labelled issue or pull request URL in the
+	// admitted job's prompt instead of "Complete <url>".
+	Prompt string `toml:"prompt"`
 }
+
+// Values of a GitHub trigger's on.
+const (
+	GitHubIssueSubject       = "issue"
+	GitHubPullRequestSubject = "pull_request"
+)
 
 type IntervalTrigger struct {
 	TriggerSelection
@@ -122,12 +220,14 @@ type ResolvedTrigger struct {
 	Schedule           string
 	Timezone           string
 	Label              string
-	SelectionName      string
-	Model              string
-	Prompt             string
-	Command            ResolvedCommand
-	Signature          string
-	cron               *triggers.Cron
+	// Subject is what a GitHub trigger's label is added to.
+	Subject       string
+	SelectionName string
+	Model         string
+	Prompt        string
+	Command       ResolvedCommand
+	Signature     string
+	cron          *triggers.Cron
 }
 
 type Command struct {
@@ -195,6 +295,12 @@ func LoadConfig(path string) (Config, error) {
 	machinistConfig.Server.configDir = filepath.Dir(machinistConfig.path)
 	machinistConfig.Server, err = applyServerDefaults(machinistConfig.Server)
 	if err != nil {
+		return Config{}, err
+	}
+	if _, err := machinistConfig.RepositorySlugs(); err != nil {
+		return Config{}, err
+	}
+	if _, err := machinistConfig.RepositoryCeilings(); err != nil {
 		return Config{}, err
 	}
 	return machinistConfig, nil
@@ -292,6 +398,9 @@ func (w Worker) ResolveRepository(name string) (string, error) {
 	repository, ok := w.Repositories[name]
 	if !ok {
 		return "", fmt.Errorf("repository %q is not configured on this worker", name)
+	}
+	if strings.TrimSpace(repository.Path) == "" {
+		return "", fmt.Errorf("repository %q has no checkout on this worker", name)
 	}
 	return resolveConfigPath(repository.Path, w.configDir)
 }
@@ -459,6 +568,17 @@ func applyWorkerDefaults(worker Worker) (Worker, error) {
 }
 
 func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, error)) (Worker, error) {
+	if worker.MaxWorkers != nil && *worker.MaxWorkers <= 0 {
+		return Worker{}, errors.New("max_workers must be positive")
+	}
+	switch strings.TrimSpace(worker.ServeRepositories) {
+	case "", ServeRegisteredRepositories:
+		worker.ServeRepositories = ServeRegisteredRepositories
+	case ServeListedRepositories:
+		worker.ServeRepositories = ServeListedRepositories
+	default:
+		return Worker{}, fmt.Errorf("serve_repositories must be %q or %q", ServeRegisteredRepositories, ServeListedRepositories)
+	}
 	worker.Name = strings.TrimSpace(worker.Name)
 	if worker.Name == "" {
 		hostname, err := getHostname()
@@ -469,6 +589,9 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 		if worker.Name == "" {
 			return Worker{}, errors.New("find machine hostname: hostname is empty")
 		}
+	}
+	if strings.TrimSpace(worker.Host) == "" {
+		worker.Host = worker.Name
 	}
 	if worker.DataDirectory == "" {
 		home, err := os.UserHomeDir()
@@ -490,8 +613,14 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 	}
 	worker.DataDirectory = filepath.Clean(worker.DataDirectory)
 	for name, repository := range worker.Repositories {
-		if strings.TrimSpace(name) == "" || strings.TrimSpace(repository.Path) == "" {
-			return Worker{}, errors.New("repository names and paths must be non-empty")
+		if strings.TrimSpace(name) == "" {
+			return Worker{}, errors.New("repository names must be non-empty")
+		}
+		if strings.TrimSpace(repository.Path) == "" {
+			// A declaration without a path means this host is willing to serve
+			// the repository but has no checkout yet; the worker clones it on
+			// first dispatch.
+			continue
 		}
 		path, err := resolveConfigPath(repository.Path, worker.configDir)
 		if err != nil {
